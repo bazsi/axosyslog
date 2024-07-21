@@ -148,15 +148,17 @@ csv_scanner_options_validate(CSVScannerOptions *options)
  ************************************************************************/
 
 static gboolean
-_is_whitespace_char(const gchar *str)
+_is_whitespace_char(CSVScanner *self, const gchar *str)
 {
+  if (_strchr_optimized_for_single_char_haystack(self->options->delimiters, *str))
+    return FALSE;
   return (*str == ' ' || *str == '\t');
 }
 
 static void
-_skip_whitespace(const gchar **src)
+_skip_whitespace(CSVScanner *self, const gchar **src)
 {
-  while (_is_whitespace_char(*src))
+  while (_is_whitespace_char(self, *src))
     (*src)++;
 }
 
@@ -184,7 +186,7 @@ _parse_left_whitespace(CSVScanner *self)
   if ((self->options->flags & CSV_SCANNER_STRIP_WHITESPACE) == 0)
     return;
 
-  _skip_whitespace(&self->src);
+  _skip_whitespace(self, &self->src);
 }
 
 static gint
@@ -379,7 +381,7 @@ _get_value_length_without_right_whitespace(CSVScanner *self)
 {
   gint len = self->current_value->len;
 
-  while (len > 0 && _is_whitespace_char(self->current_value->str + len - 1))
+  while (len > 0 && _is_whitespace_char(self, self->current_value->str + len - 1))
     len--;
 
   return len;
