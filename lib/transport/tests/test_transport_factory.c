@@ -73,7 +73,7 @@ static LogTransport *
 _transport_factory_construct(const LogTransportFactory *s, gint fd)
 {
   LogTransport *fake_transport = _fake_transport_new();
-  log_transport_init_instance(fake_transport, fd);
+  log_transport_init_instance(fake_transport, "fake", fd);
   fake_transport->free_fn = _fake_free;
 
   return fake_transport;
