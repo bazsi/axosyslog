@@ -23,7 +23,7 @@
 
 #include <criterion/criterion.h>
 
-#include "transport/transport-factory.h"
+#include "transport/transport-stack.h"
 #include "apphook.h"
 
 typedef struct _FakeTransport FakeTransport;
