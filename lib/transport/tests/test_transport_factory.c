@@ -57,6 +57,8 @@ _fake_transport_new(void)
 {
   FakeTransport *instance = g_new0(FakeTransport, 1);
 
+  log_transport_init_instance(&instance->super, "fake", -1);
+  instance->super.free_fn = _fake_free;
   instance->super.read = _fake_read;
   instance->super.write = _fake_write;
   instance->constructed = TRUE;
@@ -70,20 +72,15 @@ struct _FakeTransportFactory
 };
 
 static LogTransport *
-_transport_factory_construct(const LogTransportFactory *s, gint fd)
+_transport_factory_construct(const LogTransportFactory *s, LogTransportStack *stack)
 {
-  LogTransport *fake_transport = _fake_transport_new();
-  log_transport_init_instance(fake_transport, "fake", fd);
-  fake_transport->free_fn = _fake_free;
-
-  return fake_transport;
+  return _fake_transport_new();
 }
 
 LogTransportFactory *
 _fake_transport_factory_new(void)
 {
   FakeTransportFactory *instance = g_new0(FakeTransportFactory, 1);
-  instance->super.id = "fake";
   instance->super.construct_transport = _transport_factory_construct;
   return &instance->super;
 }
@@ -93,14 +90,17 @@ TestSuite(transport_factory, .init = app_startup, .fini = app_shutdown);
 Test(transport_factory, fake_transport_factory)
 {
   LogTransportFactory *fake_factory = _fake_transport_factory_new();
-  cr_expect_not_null(fake_factory->id);
+  LogTransportStack stack;
+
+  log_transport_stack_init(&stack);
 
   gint fd = 11;
-  FakeTransport *fake_transport = (FakeTransport *) log_transport_factory_construct_transport(fake_factory, fd);
+  FakeTransport *fake_transport = (FakeTransport *) log_transport_factory_construct_transport(fake_factory, &stack);
   cr_expect_eq(fake_transport->constructed, TRUE);
   cr_expect_eq(fake_transport->super.read, _fake_read);
   cr_expect_eq(fake_transport->super.write, _fake_write);
   log_transport_free(&fake_transport->super);
 
   log_transport_factory_free(fake_factory);
+  log_transport_stack_deinit(&stack);
 }

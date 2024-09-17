@@ -27,28 +27,36 @@
 
 #include "transport/logtransport.h"
 
-/* LogTransportFactory is an interface for representing
- * concrete LogTransportFactory instances
- * Each LogTransportFactory has
- *  - a reference to a unique id
- *  - a construct method for creating new LogTransport instances
- *  - a destroy method for releasing resources that are needed for construct()
- */
+typedef struct _LogTransportStack LogTransportStack;
 typedef struct _LogTransportFactory LogTransportFactory;
+
+typedef enum
+{
+  /* this is a special index for simple cases where we only use a single
+   * LogTransport which never changes */
+  LOG_TRANSPORT_INITIAL,
+  LOG_TRANSPORT_SOCKET,
+  LOG_TRANSPORT_TLS,
+  LOG_TRANSPORT_HAPROXY,
+  LOG_TRANSPORT_GZIP,
+  LOG_TRANSPORT_NONE,
+  LOG_TRANSPORT__MAX = LOG_TRANSPORT_NONE,
+} LogTransportIndex;
 
 struct _LogTransportFactory
 {
-  const gchar *id;
-  LogTransport *(*construct_transport)(const LogTransportFactory *self, gint fd);
+  gint index;
+  LogTransport *(*construct_transport)(const LogTransportFactory *self, LogTransportStack *stack);
   void (*free_fn)(LogTransportFactory *self);
 };
 
 static inline LogTransport *
-log_transport_factory_construct_transport(const LogTransportFactory *self, gint fd)
+log_transport_factory_construct_transport(const LogTransportFactory *self, LogTransportStack *stack)
 {
   g_assert(self->construct_transport);
 
-  LogTransport *transport = self->construct_transport(self, fd);
+  LogTransport *transport = self->construct_transport(self, stack);
+//  transport->name = self->id;
 
   return transport;
 }
@@ -61,28 +69,42 @@ log_transport_factory_free(LogTransportFactory *self)
   g_free(self);
 }
 
-static inline const gchar *
-log_transport_factory_get_id(const LogTransportFactory *self)
-{
-  /* each concrete LogTransportFactory has to have an id
-   */
-  g_assert(self->id);
-  return self->id;
-}
+void log_transport_factory_init_instance(LogTransportFactory *self, LogTransportIndex index);
 
-typedef struct _LogTransportStack LogTransportStack;
 
 struct _LogTransportStack
 {
-  LogTransport super;
-  GHashTable *registry;
-  LogTransport *active_transport;
-  const LogTransportFactory *active_transport_factory;
+  gint active_transport;
+  gint fd;
+  LogTransport *transports[LOG_TRANSPORT__MAX];
+  LogTransportFactory *transport_factories[LOG_TRANSPORT__MAX];
 };
 
-LogTransport *log_transport_stack_new(LogTransportFactory *default_transport_factory, gint fd);
+static inline LogTransport *
+log_transport_stack_get_transport(LogTransportStack *self, gint active)
+{
+  if (self->transports[active])
+    return self->transports[active];
+
+  if (self->transport_factories[active])
+    {
+      self->transports[active] = log_transport_factory_construct_transport(self->transport_factories[active], self);
+      return self->transports[active];
+    }
+  return NULL;
+}
+
+static inline LogTransport *
+log_transport_stack_get_active(LogTransportStack *self)
+{
+  return log_transport_stack_get_transport(self, self->active_transport);
+}
+
 void log_transport_stack_add_factory(LogTransportStack *self, LogTransportFactory *);
-gboolean log_transport_stack_switch(LogTransportStack *self, const gchar *id);
-gboolean log_transport_stack_contains_factory(LogTransportStack *self, const gchar *id);
+void log_transport_stack_add_transport(LogTransportStack *self, gint index, LogTransport *);
+gboolean log_transport_stack_switch(LogTransportStack *self, gint index);
+
+void log_transport_stack_init(LogTransportStack *self, LogTransport *initial_transport);
+void log_transport_stack_deinit(LogTransportStack *self);
 
 #endif

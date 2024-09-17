@@ -55,6 +55,7 @@ static LogProtoStatus
 log_proto_file_writer_flush(LogProtoClient *s)
 {
   LogProtoFileWriter *self = (LogProtoFileWriter *)s;
+  LogTransport *transport = log_transport_stack_get_active(&self->super.transport_stack);
   gint rc, i, i0, sum, ofs, pos;
 
   if (self->partial)
@@ -62,9 +63,9 @@ log_proto_file_writer_flush(LogProtoClient *s)
       /* there is still some data from the previous file writing process */
       gint len = self->partial_len - self->partial_pos;
 
-      rc = log_transport_write(self->super.transport, self->partial + self->partial_pos, len);
+      rc = log_transport_write(transport, self->partial + self->partial_pos, len);
       if (rc > 0 && self->fsync)
-        fsync(self->fd);
+        fsync(transport->fd);
       if (rc < 0)
         {
           goto write_error;
@@ -86,9 +87,9 @@ log_proto_file_writer_flush(LogProtoClient *s)
   if (self->buf_count == 0)
     return LPS_SUCCESS;
 
-  rc = log_transport_writev(self->super.transport, self->buffer, self->buf_count);
+  rc = log_transport_writev(transport, self->buffer, self->buf_count);
   if (rc > 0 && self->fsync)
-    fsync(self->fd);
+    fsync(transport->fd);
 
   if (rc < 0)
     {
@@ -141,7 +142,7 @@ write_error:
     {
       log_proto_client_msg_rewind(&self->super);
       msg_error("I/O error occurred while writing",
-                evt_tag_int("fd", self->super.transport->fd),
+                evt_tag_int("fd", transport->fd),
                 evt_tag_error(EVT_TAG_OSERROR));
       return LPS_ERROR;
     }
@@ -202,9 +203,10 @@ static gboolean
 log_proto_file_writer_prepare(LogProtoClient *s, gint *fd, GIOCondition *cond, gint *timeout)
 {
   LogProtoFileWriter *self = (LogProtoFileWriter *) s;
+  LogTransport *transport = log_transport_stack_get_active(&self->super.transport_stack);
 
-  *fd = self->super.transport->fd;
-  *cond = self->super.transport->cond;
+  *fd = transport->fd;
+  *cond = transport->cond;
 
   /* if there's no pending I/O in the transport layer, then we want to do a write */
   if (*cond == 0)
@@ -234,7 +236,6 @@ log_proto_file_writer_new(LogTransport *transport, const LogProtoClientOptions *
       struct iovec)*flush_lines);
 
   log_proto_client_init(&self->super, transport, options);
-  self->fd = transport->fd;
   self->buf_size = flush_lines;
   self->fsync = fsync_;
   self->super.prepare = log_proto_file_writer_prepare;
