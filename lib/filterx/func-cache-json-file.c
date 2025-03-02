@@ -207,6 +207,10 @@ _deep_freeze(FilterXFuntionCacheJsonFile *self, FilterXObject *object)
 
   filterx_object_make_readonly(object);
 
+  /* FIXME: instead of iterating child objects here, we should delegate
+   * to the make_readonly() call above.  Also, filterx_object_freeze()
+   * should imply making the object read-only and frozen, recursively.
+   */
   object = filterx_ref_unwrap_ro(object);
   if (filterx_object_is_type(object, &FILTERX_TYPE_NAME(dict)))
     _deep_freeze_dict(self, object);
