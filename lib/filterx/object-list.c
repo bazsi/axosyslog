@@ -112,9 +112,11 @@ _filterx_list_set_subscript(FilterXList *s, guint64 index, FilterXObject **new_v
   if (index >= self->array->len)
     g_ptr_array_set_size(self->array, index + 1);
 
+  FilterXObject *stored_object = filterx_ref_new(filterx_object_ref(*new_value));
+
   FilterXObject **slot = (FilterXObject **) &g_ptr_array_index(self->array, index);
   filterx_object_unref(*slot);
-  *slot = filterx_object_ref(*new_value);
+  *slot = filterx_object_ref(stored_object);
 
   // map other dicts/arrays to dictobj
   // filterx_object_set_modified_in_place(&self->super.super, TRUE);
@@ -256,7 +258,7 @@ filterx_list_new_from_args(FilterXExpr *s, FilterXObject *args[], gsize args_len
           return NULL;
         }
 
-      if (!filterx_object_is_type(self, &FILTERX_TYPE_NAME(list)))
+      if (!filterx_object_is_type_or_ref(self, &FILTERX_TYPE_NAME(list)))
         {
           filterx_object_unref(self);
           return NULL;

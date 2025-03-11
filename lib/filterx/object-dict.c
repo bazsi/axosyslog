@@ -569,9 +569,10 @@ _filterx_dict_set_subscript(FilterXDict *s, FilterXObject *key, FilterXObject **
   if (!_is_string(key))
     return FALSE;
 
+  FilterXObject *stored_object = filterx_ref_new(filterx_object_ref(*new_value));
 
   self->table = _table_resize_if_needed(self->table);
-  _table_insert(self->table, key, *new_value);
+  _table_insert(self->table, key, stored_object);
 
   // map other dicts/arrays to dictobj
   // filterx_object_set_modified_in_place(&self->super.super, TRUE);
@@ -719,7 +720,7 @@ filterx_dict_new_from_args(FilterXExpr *s, FilterXObject *args[], gsize args_len
                                        g_strdup(error->message), TRUE);
           g_clear_error(&error);
         }
-      if (!filterx_object_is_type(self, &FILTERX_TYPE_NAME(dict)))
+      if (!filterx_object_is_type_or_ref(self, &FILTERX_TYPE_NAME(dict)))
         {
           filterx_object_unref(self);
           return NULL;
