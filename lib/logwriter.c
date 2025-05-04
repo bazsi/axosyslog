@@ -150,8 +150,6 @@ struct _LogWriter
  *
  **/
 
-static gboolean log_writer_process_out(LogWriter *self);
-static gboolean log_writer_process_in(LogWriter *self);
 static void log_writer_broken(LogWriter *self, gint notify_code);
 static void log_writer_start_watches(LogWriter *self);
 static void log_writer_stop_watches(LogWriter *self);
@@ -211,6 +209,21 @@ log_writer_set_queue(LogWriter *self, LogQueue *queue)
 {
   log_queue_unref(self->queue);
   self->queue = log_queue_ref(queue);
+}
+
+static gboolean
+log_writer_process_in(LogWriter *self)
+{
+  if (!self->proto)
+    return FALSE;
+
+  return (log_proto_client_process_in(self->proto) == LPS_SUCCESS);
+}
+
+static gboolean
+log_writer_process_out(LogWriter *self)
+{
+  return log_writer_flush(self, LW_FLUSH_NORMAL);
 }
 
 static void
@@ -1367,20 +1380,6 @@ log_writer_forced_flush(LogWriter *self)
   return log_writer_flush(self, LW_FLUSH_FORCE);
 }
 
-static gboolean
-log_writer_process_in(LogWriter *self)
-{
-  if (!self->proto)
-    return FALSE;
-
-  return (log_proto_client_process_in(self->proto) == LPS_SUCCESS);
-}
-
-static gboolean
-log_writer_process_out(LogWriter *self)
-{
-  return log_writer_flush(self, LW_FLUSH_NORMAL);
-}
 
 static void
 log_writer_reopen_timeout(void *cookie)
