@@ -498,8 +498,6 @@ afsocket_dd_construct_writer_method(AFSocketDestDriver *self)
   guint32 writer_flags = 0;
 
   writer_flags |= LW_FORMAT_PROTO;
-  if (self->transport_mapper->sock_type == SOCK_STREAM && self->close_on_input)
-    writer_flags |= LW_DETECT_EOF;
 
   LogWriter *writer = log_writer_new(writer_flags, self->super.super.super.cfg);
   log_pipe_set_options((LogPipe *) writer, &self->super.super.super.options);

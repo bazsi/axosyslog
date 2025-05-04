@@ -150,6 +150,7 @@ struct _LogWriter
  *
  **/
 
+static gboolean log_writer_flush(LogWriter *self, LogWriterFlushMode flush_mode);
 static void log_writer_broken(LogWriter *self, gint notify_code);
 static void log_writer_start_watches(LogWriter *self);
 static void log_writer_stop_watches(LogWriter *self);
@@ -353,16 +354,6 @@ log_writer_io_error(gpointer s)
 }
 
 static void
-log_writer_io_check_eof(gpointer s)
-{
-  LogWriter *self = (LogWriter *) s;
-
-  msg_error("EOF occurred while idle",
-            evt_tag_int("fd", log_proto_client_get_fd(self->proto)));
-  log_writer_broken(self, NC_CLOSE);
-}
-
-static void
 log_writer_error_suspend_elapsed(gpointer s)
 {
   LogWriter *self = (LogWriter *) s;
@@ -381,8 +372,6 @@ log_writer_update_fd_callbacks(LogWriter *self, GIOCondition cond)
     {
       if (cond & G_IO_IN)
         iv_fd_set_handler_in(&self->fd_watch, log_writer_io_handle_in);
-      else if (self->flags & LW_DETECT_EOF)
-        iv_fd_set_handler_in(&self->fd_watch, log_writer_io_check_eof);
       else
         iv_fd_set_handler_in(&self->fd_watch, NULL);
 
