@@ -31,8 +31,8 @@ typedef struct _LogProtoTextClient
   LogProtoClient super;
   gint state, next_state;
   guchar *partial;
-  GDestroyNotify partial_free;
   gsize partial_len, partial_pos;
+  GDestroyNotify partial_free;
 } LogProtoTextClient;
 
 LogProtoStatus log_proto_text_client_submit_write(LogProtoClient *s, guchar *msg, gsize msg_len,

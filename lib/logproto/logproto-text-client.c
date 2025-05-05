@@ -31,44 +31,9 @@ log_proto_text_client_poll_prepare(LogProtoClient *s, GIOCondition *cond, GIOCon
 {
   LogProtoTextClient *self = (LogProtoTextClient *) s;
 
-  if (log_transport_stack_poll_prepare(&self->super.transport_stack, cond))
-    return TRUE;
-
-  /* if there's no pending I/O in the transport layer, then we want to do a write */
-  if (*cond == 0)
-    *cond = G_IO_OUT;
-
+  *cond = G_IO_OUT | G_IO_IN;
+  *idle_cond = G_IO_IN;
   return self->partial != NULL;
-}
-
-static LogProtoStatus
-log_proto_text_client_drop_input(LogProtoClient *s)
-{
-  LogProtoTextClient *self = (LogProtoTextClient *) s;
-  guchar buf[1024];
-  gint rc = -1;
-
-  do
-    {
-      rc = log_transport_stack_read(&self->super.transport_stack, buf, sizeof(buf), NULL);
-    }
-  while (rc > 0);
-
-  if (rc == -1 && errno != EAGAIN)
-    {
-      msg_error("Error reading data",
-                evt_tag_int("fd", self->super.transport_stack.fd),
-                evt_tag_error("error"));
-      return LPS_ERROR;
-    }
-  else if (rc == 0)
-    {
-      msg_error("EOF occurred while idle",
-                evt_tag_int("fd", self->super.transport_stack.fd));
-      return LPS_ERROR;
-    }
-
-  return LPS_SUCCESS;
 }
 
 static LogProtoStatus
@@ -116,6 +81,43 @@ log_proto_text_client_flush(LogProtoClient *s)
   log_proto_client_msg_ack(&self->super, 1);
 
   /* NOTE: we return here to give a chance to the framed protocol to send the frame header. */
+  return LPS_SUCCESS;
+}
+
+static LogProtoStatus
+log_proto_text_client_process_input(LogProtoClient *s)
+{
+  LogProtoTextClient *self = (LogProtoTextClient *) s;
+  guchar buf[1024];
+  gint rc = -1;
+
+  do
+    {
+      rc = log_transport_stack_read(&self->super.transport_stack, buf, sizeof(buf), NULL);
+      if (rc > 0)
+        {
+          msg_debug("Incoming data in reverse direction",
+                    evt_tag_int("fd", self->super.transport_stack.fd),
+                    evt_tag_mem("data", buf, MIN(rc, 256)),
+                    evt_tag_int("length", rc));
+        }
+    }
+  while (rc > 0);
+
+  if (rc == -1 && errno != EAGAIN)
+    {
+      msg_error("Error reading data",
+                evt_tag_int("fd", self->super.transport_stack.fd),
+                evt_tag_error("error"));
+      return LPS_ERROR;
+    }
+  else if (rc == 0)
+    {
+      msg_error("EOF occurred while idle",
+                evt_tag_int("fd", self->super.transport_stack.fd));
+      return LPS_ERROR;
+    }
+
   return LPS_SUCCESS;
 }
 
@@ -196,8 +198,7 @@ log_proto_text_client_init(LogProtoTextClient *self, LogTransport *transport, co
   log_proto_client_init(&self->super, transport, options);
   self->super.poll_prepare = log_proto_text_client_poll_prepare;
   self->super.flush = log_proto_text_client_flush;
-  if (options->drop_input)
-    self->super.process_in = log_proto_text_client_drop_input;
+  self->super.process_in = log_proto_text_client_process_input;
   self->super.post = log_proto_text_client_post;
   self->super.free_fn = log_proto_text_client_free;
   self->next_state = -1;

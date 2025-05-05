@@ -67,6 +67,7 @@ struct _LogProtoClient
   LogProtoStatus status;
   const LogProtoClientOptions *options;
   LogTransportStack transport_stack;
+  gboolean responding_to_transport_io_request;
   gboolean (*poll_prepare)(LogProtoClient *s, GIOCondition *cond, GIOCondition *idle_cond, gint *timeout);
   LogProtoStatus (*post)(LogProtoClient *s, LogMessage *logmsg, guchar *msg, gsize msg_len, gboolean *consumed);
   LogProtoStatus (*process_in)(LogProtoClient *s);
@@ -85,6 +86,7 @@ log_proto_client_set_client_flow_control(LogProtoClient *self, LogProtoClientFlo
   self->flow_control_funcs.rewind_callback = flow_control_funcs->rewind_callback;
   self->flow_control_funcs.user_data = flow_control_funcs->user_data;
 }
+
 static inline void
 log_proto_client_msg_ack(LogProtoClient *self, gint num_msg_acked)
 {
@@ -123,39 +125,38 @@ log_proto_client_handshake(LogProtoClient *s, gboolean *handshake_finished)
 }
 
 static inline gboolean
-log_proto_client_poll_prepare(LogProtoClient *s, GIOCondition *cond, GIOCondition *idle_cond, gint *timeout)
+log_proto_client_poll_prepare(LogProtoClient *self, GIOCondition *cond, GIOCondition *idle_cond, gint *timeout)
 {
-  gboolean result = s->poll_prepare(s, cond, idle_cond, timeout);
+  self->responding_to_transport_io_request = TRUE;
+  if (log_transport_stack_poll_prepare(&self->transport_stack, cond))
+    return TRUE;
+
+  gboolean result;
+  if (*cond == 0)
+    {
+      self->responding_to_transport_io_request = FALSE;
+      result = self->poll_prepare(self, cond, idle_cond, timeout);
+    }
+  else
+    result = FALSE;
 
   if (!result && *timeout < 0)
-    *timeout = s->options->idle_timeout;
+    *timeout = self->options->idle_timeout;
   return result;
 }
 
 static inline LogProtoStatus
-log_proto_client_flush(LogProtoClient *s)
+log_proto_client_flush(LogProtoClient *self)
 {
-  if (s->flush)
-    return s->flush(s);
-  else
-    return LPS_SUCCESS;
+  return self->flush(self);
 }
 
 static inline LogProtoStatus
-log_proto_client_process_in(LogProtoClient *s)
+log_proto_client_process_in(LogProtoClient *self)
 {
-  if (s->process_in)
-    return s->process_in(s);
-  else if (s->flush)
-    /*
-     * In some clients, flush is used for input processing, but it should not be.
-     * Fix these clients, than remove the flush call here.
-     *
-     * SSL_ERROR_WANT_READ in the TLS transport is also built upon this.
-     */
-    return s->flush(s);
-  else
-    return LPS_SUCCESS;
+  if (self->responding_to_transport_io_request)
+    return log_proto_client_flush(self);
+  return self->process_in(self);
 }
 
 static inline LogProtoStatus

@@ -234,12 +234,7 @@ log_proto_file_writer_poll_prepare(LogProtoClient *s, GIOCondition *cond, GIOCon
 {
   LogProtoFileWriter *self = (LogProtoFileWriter *) s;
 
-  if (log_transport_stack_poll_prepare(&self->super.transport_stack, cond))
-    return TRUE;
-
-  /* if there's no pending I/O in the transport layer, then we want to do a write */
-  if (*cond == 0)
-    *cond = G_IO_OUT;
+  *cond = G_IO_OUT;
   return self->buf_count > 0 || self->partial;
 }
 
