@@ -27,14 +27,12 @@
 #include <errno.h>
 
 static gboolean
-log_proto_text_client_poll_prepare(LogProtoClient *s, gint *fd, GIOCondition *cond, gint *timeout)
+log_proto_text_client_poll_prepare(LogProtoClient *s, GIOCondition *cond, GIOCondition *idle_cond, gint *timeout)
 {
   LogProtoTextClient *self = (LogProtoTextClient *) s;
 
   if (log_transport_stack_poll_prepare(&self->super.transport_stack, cond))
     return TRUE;
-
-  *fd = self->super.transport_stack.fd;
 
   /* if there's no pending I/O in the transport layer, then we want to do a write */
   if (*cond == 0)
