@@ -81,6 +81,8 @@ struct _FilterXExpr
   void (*free_fn)(FilterXExpr *self);
 
   gboolean (*walk_children)(FilterXExpr *self, FilterXExprWalkFunc f, gpointer user_data);
+  gboolean (*equal_to)(FilterXExpr *self, FilterXExpr *other);
+  guint (*hash)(FilterXExpr *self);
 
   /* type of the expr, is not freed, assumed to be managed by something else
    * */
@@ -305,6 +307,20 @@ filterx_expr_compile_or_eval_typed(FilterXExpr *self, FilterXJIT *jit)
     return filterx_expr_compile_typed(self, jit);
 
   return fx_jit_emit_expr_eval_typed(jit, self);
+}
+
+static inline gboolean
+filterx_expr_equal_to(FilterXExpr *self, FilterXExpr *other)
+{
+  if (strcmp(self->type, other->type) != 0)
+    return FALSE;
+  return self->equal_to(self, other);
+}
+
+static inline guint
+filterx_expr_hash(FilterXExpr *self)
+{
+  return g_str_hash(self->type) + (self->hash ? self->hash(self) : 0);
 }
 
 typedef struct _FilterXUnaryOp
