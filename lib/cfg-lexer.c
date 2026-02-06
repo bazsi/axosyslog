@@ -208,6 +208,14 @@ cfg_lexer_undo_set_file_location(CfgLexer *self, CFG_LTYPE *yylloc)
 }
 
 void
+cfg_lexer_get_current_location(CfgLexer *self, gint include_level, CFG_LTYPE *yylloc)
+{
+  g_assert(include_level <= self->include_depth);
+  CfgIncludeLevel *level = &self->include_stack[self->include_depth];
+  *yylloc = level->lloc;
+}
+
+void
 cfg_lexer_set_file_location(CfgLexer *self, const gchar *filename, gint line, gint column)
 {
   CfgIncludeLevel *level = &self->include_stack[self->include_depth];
@@ -474,6 +482,7 @@ cfg_lexer_alloc_include_level(CfgLexer *self, const gchar *include_target)
     }
 
   self->include_depth++;
+  self->include_stack[self->include_depth].lloc.include_level = self->include_depth;
   return &self->include_stack[self->include_depth];
 }
 

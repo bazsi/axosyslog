@@ -105,6 +105,7 @@ typedef struct CFG_LTYPE
   } at_line;
 
   const gchar *name;
+  gint include_level;
 } CFG_LTYPE;
 
 /* symbol type that carries token related information to the grammar */
@@ -223,6 +224,7 @@ gboolean cfg_lexer_include_buffer_without_backtick_substitution(CfgLexer *self,
     const gchar *name, const gchar *buffer, gsize length);
 const gchar *cfg_lexer_format_location(CfgLexer *self, const CFG_LTYPE *yylloc, gchar *buf, gsize buf_len);
 void cfg_lexer_undo_set_file_location(CfgLexer *self, CFG_LTYPE *yylloc);
+void cfg_lexer_get_current_location(CfgLexer *self, gint include_level, CFG_LTYPE *yylloc);
 void cfg_lexer_set_file_location(CfgLexer *self, const gchar *filename, gint line, gint column);
 EVTTAG *cfg_lexer_format_location_tag(CfgLexer *self, const CFG_LTYPE *yylloc);
 

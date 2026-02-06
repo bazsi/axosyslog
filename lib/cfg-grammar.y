@@ -55,6 +55,14 @@
 %define api.location.type {CFG_LTYPE}
 %define parse.error verbose
 
+%initial-action {
+    @$.first_line = 1;
+    @$.first_column = 1;
+    @$.last_line = 1;
+    @$.last_column = 1;
+    @$.include_level = lexer->include_depth;
+}
+
 %code {
 
 #pragma GCC diagnostic ignored "-Wswitch-default"
@@ -65,26 +73,53 @@
 #endif
 
 
+static gint
+_get_lowest_include_level(YYLTYPE *start, YYLTYPE *end, gboolean *same_levels)
+{
+  gint result = start->include_level;
+  *same_levels = TRUE;
+  for (YYLTYPE *p = start; p <= end; p++)
+    {
+      if (p->include_level != start->include_level)
+        {
+          *same_levels = FALSE;
+          if (p->include_level < result)
+            result = p->include_level;
+        }
+    }
+  return result;
+}
+
 # define YYLLOC_DEFAULT(Current, Rhs, N)                                \
   do {                                                                  \
     if (N)                                                              \
       {                                                                 \
+        gboolean same_levels;                                           \
+        gint include_level = _get_lowest_include_level(&YYRHSLOC(Rhs, 1), &YYRHSLOC(Rhs, N), &same_levels);  \
+                                                                        \
+        if (!same_levels)                                               \
+          {                                                             \
+            cfg_lexer_get_current_location(lexer, include_level, &YYRHSLOC (Rhs, N));  \
+          }                                                             \
         (Current).name         = YYRHSLOC(Rhs, 1).name;                 \
         (Current).at_line      = YYRHSLOC (Rhs, 1).at_line;             \
         (Current).first_line   = YYRHSLOC (Rhs, 1).first_line;          \
         (Current).first_column = YYRHSLOC (Rhs, 1).first_column;        \
         (Current).last_line    = YYRHSLOC (Rhs, N).last_line;           \
         (Current).last_column  = YYRHSLOC (Rhs, N).last_column;         \
+        (Current).include_level= YYRHSLOC (Rhs, N).include_level;       \
       }                                                                 \
     else                                                                \
       {                                                                 \
         (Current).name         = YYRHSLOC(Rhs, 0).name;                 \
-        (Current).at_line      = YYRHSLOC (Rhs, 0).at_line;             \
+        (Current).at_line      = YYRHSLOC(Rhs, 0).at_line;              \
         (Current).first_line   = (Current).last_line   =                \
           YYRHSLOC (Rhs, 0).last_line;                                  \
         (Current).first_column = (Current).last_column =                \
           YYRHSLOC (Rhs, 0).last_column;                                \
+        (Current).include_level= YYRHSLOC(Rhs, 0).include_level;        \
       }                                                                 \
+    fprintf(stderr, "yylloc_default: %s %d:%d -> %d:%d\n", (Current).name, (Current).first_line, (Current).first_column, (Current).last_line, (Current).last_column); \
   } while (0)
 
 #define CHECK_ERROR_WITHOUT_MESSAGE(val, token) do {                    \
