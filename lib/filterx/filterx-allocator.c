@@ -23,6 +23,7 @@
 #include "tls-support.h"
 #include "compat/pow2.h"
 #include "messages.h"
+#include <stdio.h>
 
 /*
  * The allocator provides storage for FilterXObject instances that is:
@@ -137,6 +138,8 @@ filterx_allocator_malloc(FilterXAllocator *allocator, gsize size, gsize zero_siz
   FilterXArea *area;
 
   g_assert(filterx_allocator_alloc_size_supported(allocator, size));
+
+// fprintf(stderr, "allocating %lu bytes for %s\n", size, type);
   if (allocator->areas->len == 0)
     {
       area = _create_new_area(allocator);

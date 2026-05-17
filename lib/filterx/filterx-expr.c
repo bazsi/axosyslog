@@ -328,13 +328,13 @@ filterx_expr_dedup(FilterXExpr *self)
                 (self->expr_text[0] == '"' && expr->expr_text[0] == '\'')))
             marker = "!!!";
         }
-      fprintf(stderr, "deduplicating expr %s %s\n    %p [%s] ->\n    %p [%s]\n", self->type, marker, self, self->expr_text, expr, expr->expr_text);
+//      fprintf(stderr, "deduplicating expr %s %s\n    %p [%s] ->\n    %p [%s]\n", self->type, marker, self, self->expr_text, expr, expr->expr_text);
       filterx_expr_unref(self);
       return filterx_expr_ref(expr);
     }
   else
     {
-      fprintf(stderr, "registering expr %s %p  [%s]\n", self->type, self, self->expr_text);
+//      fprintf(stderr, "registering expr %s %p  [%s]\n", self->type, self, self->expr_text);
       g_hash_table_insert(deduplicated_exprs, self, filterx_expr_ref(self));
       self->deduplicated = TRUE;
       return self;
