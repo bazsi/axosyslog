@@ -225,7 +225,7 @@ filterx_eval_context_is_production(FilterXEvalContext *context)
 }
 
 static inline FilterXObject *
-filterx_eval_malloc_object(gsize object_size, gsize alloc_size)
+filterx_malloc_object(gsize object_size, gsize alloc_size, const gchar *type)
 {
   FilterXEvalContext *context = filterx_eval_get_context();
   FilterXObject *result;
@@ -237,7 +237,7 @@ filterx_eval_malloc_object(gsize object_size, gsize alloc_size)
     }
   else
     {
-      result = (FilterXObject *) filterx_allocator_malloc(context->allocator, alloc_size, object_size);
+      result = (FilterXObject *) filterx_allocator_malloc(context->allocator, alloc_size, object_size, type);
       result->allocator_used = TRUE;
     }
   result->early_allocation = !filterx_eval_context_is_production(context);

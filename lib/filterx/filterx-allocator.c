@@ -132,7 +132,7 @@ _create_new_area(FilterXAllocator *allocator)
 }
 
 gpointer
-filterx_allocator_malloc(FilterXAllocator *allocator, gsize size, gsize zero_size)
+filterx_allocator_malloc(FilterXAllocator *allocator, gsize size, gsize zero_size, const gchar *type)
 {
   FilterXArea *area;
 

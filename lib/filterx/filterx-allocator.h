@@ -43,7 +43,7 @@ void filterx_allocator_save_position(FilterXAllocator *allocator, FilterXAllocat
 void filterx_allocator_restore_position(FilterXAllocator *allocator, FilterXAllocatorPosition *pos);
 void filterx_allocator_empty(FilterXAllocator *allocator);
 
-gpointer filterx_allocator_malloc(FilterXAllocator *allocator, gsize size, gsize zero_size);
+gpointer filterx_allocator_malloc(FilterXAllocator *allocator, gsize size, gsize zero_size, const gchar *type);
 
 void filterx_allocator_init(FilterXAllocator *allocator);
 void filterx_allocator_clear(FilterXAllocator *allocator);
