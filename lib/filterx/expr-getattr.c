@@ -121,6 +121,17 @@ _isset(FilterXExpr *s)
   return result;
 }
 
+static gboolean
+_equal_to(FilterXExpr *s, FilterXExpr *o)
+{
+  FilterXGetAttr *self = (FilterXGetAttr *) s;
+  FilterXGetAttr *other = (FilterXGetAttr *) o;
+  if (!filterx_expr_equal_to_method(s, o))
+    return FALSE;
+
+  return self->attr == other->attr;
+}
+
 static void
 _free(FilterXExpr *s)
 {
@@ -158,6 +169,7 @@ filterx_getattr_new(FilterXExpr *operand, FilterXObject *attr_name)
   self->super.move = _move;
   self->super.is_set = _isset;
   self->super.walk_children = _getattr_walk;
+  self->super.equal_to = _equal_to;
   self->super.free_fn = _free;
   self->operand = operand;
 

@@ -144,6 +144,17 @@ _setattr_walk(FilterXExpr *s, FilterXExprWalkFunc f, gpointer user_data)
   return TRUE;
 }
 
+static gboolean
+_setattr_equal_to(FilterXExpr *s, FilterXExpr *o)
+{
+  FilterXSetAttr *self = (FilterXSetAttr *) s;
+  FilterXSetAttr *other = (FilterXSetAttr *) o;
+  if (!filterx_expr_equal_to_method(s, o))
+    return FALSE;
+
+  return self->attr == other->attr;
+}
+
 /* Takes reference of object and new_value */
 FilterXExpr *
 filterx_setattr_new(FilterXExpr *object, FilterXObject *attr_name, FilterXExpr *new_value)
@@ -153,6 +164,7 @@ filterx_setattr_new(FilterXExpr *object, FilterXObject *attr_name, FilterXExpr *
   filterx_expr_init_instance(&self->super, "setattr", FXE_WRITE);
   self->super.eval = _setattr_eval;
   self->super.walk_children = _setattr_walk;
+  self->super.equal_to = _setattr_equal_to;
   self->super.free_fn = _free;
   self->object = object;
 

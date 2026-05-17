@@ -181,6 +181,24 @@ _unset(FilterXExpr *s)
   return TRUE;
 }
 
+static gboolean
+_equal_to(FilterXExpr *s, FilterXExpr *o)
+{
+  FilterXVariableExpr *self = (FilterXVariableExpr *) s;
+  FilterXVariableExpr *other = (FilterXVariableExpr *) o;
+
+  // NOTE: requires frozen objects
+  return self->variable_name == other->variable_name && self->variable_type == other->variable_type;
+}
+
+static guint
+_hash(FilterXExpr *s)
+{
+  FilterXVariableExpr *self = (FilterXVariableExpr *) s;
+
+  return g_direct_hash(self->variable_name);
+}
+
 static void
 _free(FilterXExpr *s)
 {
@@ -219,6 +237,8 @@ filterx_variable_expr_new(const gchar *name, FilterXVariableType variable_type)
   self->super.assign = _assign;
   self->super.is_set = _isset;
   self->super.unset = _unset;
+  self->super.equal_to = _equal_to;
+  self->super.hash = _hash;
 
   self->variable_type = variable_type;
 

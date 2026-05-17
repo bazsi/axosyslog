@@ -93,6 +93,18 @@ _regexp_match_walk(FilterXExpr *s, FilterXExprWalkFunc f, gpointer user_data)
   return TRUE;
 }
 
+static gboolean
+_regexp_match_equal_to(FilterXExpr *s, FilterXExpr *o)
+{
+  FilterXExprRegexpMatch *self = (FilterXExprRegexpMatch *) s;
+  FilterXExprRegexpMatch *other = (FilterXExprRegexpMatch *) o;
+
+  if (!filterx_expr_equal_to_method(s, o))
+    return FALSE;
+
+  return self->pattern_string == other->pattern_string;
+}
+
 /* Takes reference of lhs */
 FilterXExpr *
 filterx_expr_regexp_match_new(FilterXExpr *lhs, FilterXObject *pattern)
@@ -102,6 +114,7 @@ filterx_expr_regexp_match_new(FilterXExpr *lhs, FilterXObject *pattern)
   filterx_expr_init_instance(&self->super, "regexp_match", FXE_READ);
   self->super.eval = _regexp_match_eval;
   self->super.walk_children = _regexp_match_walk;
+  self->super.equal_to = _regexp_match_equal_to;
   self->super.free_fn = _regexp_match_free;
 
   self->lhs = lhs;

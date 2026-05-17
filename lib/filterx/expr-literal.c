@@ -58,6 +58,24 @@ _literal_walk(FilterXExpr *s, FilterXExprWalkFunc f, gpointer user_data)
   return TRUE;
 }
 
+static gboolean
+_literal_equal_to(FilterXExpr *s, FilterXExpr *o)
+{
+  FilterXLiteral *self = (FilterXLiteral *) s;
+  FilterXLiteral *other = (FilterXLiteral *) o;
+
+  // NOTE: requires frozen objects
+  return self->object == other->object;
+}
+
+static guint
+_literal_hash(FilterXExpr *s)
+{
+  FilterXLiteral *self = (FilterXLiteral *) s;
+
+  return g_direct_hash(self->object);
+}
+
 /* NOTE: takes the object reference */
 void
 filterx_literal_init_instance(FilterXLiteral *s, FilterXObject *object)
@@ -67,6 +85,9 @@ filterx_literal_init_instance(FilterXLiteral *s, FilterXObject *object)
   filterx_expr_init_instance(&self->super, FILTERX_EXPR_TYPE_NAME(literal), FXE_READ);
   self->super.eval = _eval_literal;
   self->super.walk_children = _literal_walk;
+  self->super.equal_to = _literal_equal_to;
+  self->super.hash = _literal_hash;
+
   self->super.free_fn = _free;
   self->object = object;
 }

@@ -284,6 +284,18 @@ _optimize(FilterXExpr *s)
   return NULL;
 }
 
+static gboolean
+_filterx_comparison_equal_to(FilterXExpr *s, FilterXExpr *o)
+{
+  FilterXComparison *self = (FilterXComparison *) s;
+  FilterXComparison *other = (FilterXComparison *) o;
+  if (!filterx_expr_equal_to_method(s, o))
+    return FALSE;
+
+  return self->operator == other->operator;
+
+}
+
 static void
 _filterx_comparison_free(FilterXExpr *s)
 {
@@ -304,6 +316,7 @@ filterx_comparison_new(FilterXExpr *lhs, FilterXExpr *rhs, gint operator)
   self->super.super.optimize = _optimize;
   self->super.super.eval = _eval_comparison;
   self->super.super.free_fn = _filterx_comparison_free;
+  self->super.super.equal_to = _filterx_comparison_equal_to;
   self->operator = operator;
 
   return &self->super.super;
