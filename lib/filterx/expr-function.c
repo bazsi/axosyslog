@@ -242,6 +242,12 @@ _function_deinit(FilterXExpr *s, GlobalConfig *cfg)
   return filterx_function_deinit_method(self, cfg);
 }
 
+static gboolean
+_function_equal_to(FilterXExpr *s, FilterXExpr *o)
+{
+  return FALSE;
+}
+
 static void
 _function_free(FilterXExpr *s)
 {
@@ -258,6 +264,7 @@ filterx_function_init_instance(FilterXFunction *s, const gchar *function_name, F
   s->super.init = _function_init;
   s->super.deinit = _function_deinit;
   s->super.name = s->function_name;
+  s->super.equal_to = _function_equal_to;
   s->super.free_fn = _function_free;
 }
 

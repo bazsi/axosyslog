@@ -173,6 +173,12 @@ _conditional_walk(FilterXExpr *s, FilterXExprWalkFunc f, gpointer user_data)
   return TRUE;
 }
 
+static gboolean
+_conditional_equal_to(FilterXExpr *s, FilterXExpr *o)
+{
+  return FALSE;
+}
+
 FilterXExpr *
 filterx_conditional_new(FilterXExpr *condition)
 {
@@ -181,6 +187,7 @@ filterx_conditional_new(FilterXExpr *condition)
   self->super.eval = _eval_conditional;
   self->super.optimize = _optimize;
   self->super.walk_children = _conditional_walk;
+//  self->super.equal_to = _conditional_equal_to;
   self->super.free_fn = _free;
   self->super.suppress_from_trace = TRUE;
   self->condition = condition;

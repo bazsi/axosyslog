@@ -61,11 +61,18 @@ _eval_switch_case(FilterXSwitchCase *self)
   return filterx_expr_eval_typed(self->super.operand);
 }
 
+static gboolean
+_switch_case_equal_to(FilterXExpr *s, FilterXExpr *o)
+{
+  return FALSE;
+}
+
 FilterXExpr *
 filterx_switch_case_new(FilterXExpr *value)
 {
   FilterXSwitchCase *self = g_new0(FilterXSwitchCase, 1);
   filterx_unary_op_init_instance(&self->super, FILTERX_EXPR_TYPE_NAME(switch_case), FXE_READ, value);
+  self->super.super.equal_to = _switch_case_equal_to;
   return &self->super.super;
 }
 
@@ -301,6 +308,12 @@ _switch_walk(FilterXExpr *s, FilterXExprWalkFunc f, gpointer user_data)
   return TRUE;
 }
 
+static gboolean
+_switch_equal_to(FilterXExpr *s, FilterXExpr *o)
+{
+  return FALSE;
+}
+
 FilterXExpr *
 filterx_switch_new(FilterXExpr *selector, GList *body)
 {
@@ -311,6 +324,7 @@ filterx_switch_new(FilterXExpr *selector, GList *body)
   self->super.optimize = _optimize;
   self->super.eval = _eval_switch;
   self->super.walk_children = _switch_walk;
+  self->super.equal_to = _switch_equal_to;
   self->super.free_fn = _free;
   self->cases = g_ptr_array_new_with_free_func((GDestroyNotify) filterx_expr_unref);
   self->literal_cache = g_hash_table_new_full((GHashFunc) filterx_object_hash, (GEqualFunc) filterx_object_equal, (GDestroyNotify) filterx_object_unref, (GDestroyNotify) filterx_expr_unref);
