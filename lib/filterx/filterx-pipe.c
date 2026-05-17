@@ -73,6 +73,7 @@ log_filterx_pipe_init(LogPipe *s)
 
   filterx_eval_begin_compile(&compile_context, cfg);
   self->block = filterx_expr_optimize(self->block);
+  self->block = filterx_expr_dedup(self->block);
   filterx_eval_end_compile(&compile_context);
 
   if (!filterx_expr_init(self->block, cfg))

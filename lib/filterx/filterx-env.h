@@ -29,11 +29,13 @@ typedef struct _FilterXEnvironment
 {
   GPtrArray *frozen_objects;
   GHashTable *deduplicated_objects;
+  GHashTable *deduplicated_exprs;
   GPtrArray *weak_refs;
 } FilterXEnvironment;
 
 void filterx_env_dedup_object(FilterXEnvironment *self, FilterXObject **object);
 void filterx_env_freeze_object(FilterXEnvironment *self, FilterXObject **object);
+void filterx_env_dedup_expr(FilterXEnvironment *self, FilterXExpr **expr);
 void filterx_env_move(FilterXEnvironment *target, FilterXEnvironment *source);
 void filterx_env_init(FilterXEnvironment *self);
 void filterx_env_clear(FilterXEnvironment *self);

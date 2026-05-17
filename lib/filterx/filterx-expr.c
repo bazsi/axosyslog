@@ -302,7 +302,7 @@ _optimize_child_exprs(FilterXExpr *parent, FilterXExpr **child, gpointer user_da
 }
 
 FilterXExpr *
-filterx_expr_dedup(FilterXExpr *self)
+filterx_expr_dedup(FilterXExpr *self, FilterXEvalContext *context)
 {
   // FIXME: only works once!
   static GHashTable *deduplicated_exprs = NULL;
