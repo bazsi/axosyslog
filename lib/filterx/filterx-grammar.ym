@@ -271,7 +271,7 @@ dpath_element
 	;
 
 declaration
-    : KW_DECLARE filterx_variable KW_ASSIGN expr	{ filterx_variable_expr_declare($2); $$ = filterx_assign_new($2, $4); }
+    : KW_DECLARE filterx_variable KW_ASSIGN expr	{ filterx_variable_expr_declare($2); $$ = filterx_assign_new(_assign_location($2, lexer, &@2), $4); }
     ;
 
 expr: __expr				{ $$ = _assign_location($1, lexer, &@1); }
