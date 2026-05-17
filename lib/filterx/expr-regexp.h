@@ -27,7 +27,7 @@
 #include "filterx/expr-function.h"
 #include "filterx/func-flags.h"
 
-FilterXExpr *filterx_expr_regexp_match_new(FilterXExpr *lhs, const gchar *pattern);
-FilterXExpr *filterx_expr_regexp_nomatch_new(FilterXExpr *lhs, const gchar *pattern);
+FilterXExpr *filterx_expr_regexp_match_new(FilterXExpr *lhs, FilterXObject *pattern);
+FilterXExpr *filterx_expr_regexp_nomatch_new(FilterXExpr *lhs, FilterXObject *pattern);
 
 #endif

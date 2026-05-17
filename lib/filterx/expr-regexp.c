@@ -36,6 +36,7 @@ typedef struct FilterXExprRegexpMatch_
 {
   FilterXExpr super;
   FilterXExpr *lhs;
+  FilterXObject *pattern_string;
   pcre2_code_8 *pattern;
   gboolean invert;
 } FilterXExprRegexpMatch;
@@ -69,6 +70,7 @@ _regexp_match_free(FilterXExpr *s)
 {
   FilterXExprRegexpMatch *self = (FilterXExprRegexpMatch *) s;
 
+  filterx_object_unref(self->pattern_string);
   filterx_expr_unref(self->lhs);
   if (self->pattern)
     pcre2_code_free(self->pattern);
@@ -93,7 +95,7 @@ _regexp_match_walk(FilterXExpr *s, FilterXExprWalkFunc f, gpointer user_data)
 
 /* Takes reference of lhs */
 FilterXExpr *
-filterx_expr_regexp_match_new(FilterXExpr *lhs, const gchar *pattern)
+filterx_expr_regexp_match_new(FilterXExpr *lhs, FilterXObject *pattern)
 {
   FilterXExprRegexpMatch *self = g_new0(FilterXExprRegexpMatch, 1);
 
@@ -103,18 +105,26 @@ filterx_expr_regexp_match_new(FilterXExpr *lhs, const gchar *pattern)
   self->super.free_fn = _regexp_match_free;
 
   self->lhs = lhs;
-  self->pattern = filterx_regexp_compile_pattern_defaults(pattern, strlen(pattern));
+  self->pattern_string = pattern;
+
+  gsize len;
+  const gchar *pattern_text = filterx_string_get_value_ref(pattern, &len);
+  if (!pattern_text)
+    goto error;
+
+  self->pattern = filterx_regexp_compile_pattern_defaults(pattern_text, len);
   if (!self->pattern)
-    {
-      filterx_expr_unref(&self->super);
-      return NULL;
-    }
+    goto error;
 
   return &self->super;
+error:
+  filterx_expr_unref(&self->super);
+  return NULL;
+
 }
 
 FilterXExpr *
-filterx_expr_regexp_nomatch_new(FilterXExpr *lhs, const gchar *pattern)
+filterx_expr_regexp_nomatch_new(FilterXExpr *lhs, FilterXObject *pattern)
 {
   FilterXExprRegexpMatch *self = (FilterXExprRegexpMatch *)filterx_expr_regexp_match_new(lhs, pattern);
   self->invert = TRUE;
