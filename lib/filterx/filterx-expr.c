@@ -302,6 +302,46 @@ _optimize_child_exprs(FilterXExpr *parent, FilterXExpr **child, gpointer user_da
 }
 
 FilterXExpr *
+filterx_expr_dedup(FilterXExpr *self)
+{
+  // FIXME: only works once!
+  static GHashTable *deduplicated_exprs = NULL;
+
+  if (self->deduplicated)
+    return self;
+
+  if (!deduplicated_exprs)
+    deduplicated_exprs = g_hash_table_new_full((GHashFunc) filterx_expr_hash,
+                                               (GEqualFunc) filterx_expr_equal_to,
+                                               NULL,
+                                               (GDestroyNotify) filterx_expr_unref);
+
+  FilterXExpr *expr = g_hash_table_lookup(deduplicated_exprs, self);
+  g_assert(expr != self);
+  if (expr)
+    {
+      const gchar *marker = "";
+      if (self->expr_text && expr->expr_text &&
+          strcmp(self->expr_text, expr->expr_text) != 0)
+        {
+          if (!((self->expr_text[0] == '\'' && expr->expr_text[0] == '"') ||
+                (self->expr_text[0] == '"' && expr->expr_text[0] == '\'')))
+            marker = "!!!";
+        }
+      fprintf(stderr, "deduplicating expr %s %s\n    %p [%s] ->\n    %p [%s]\n", self->type, marker, self, self->expr_text, expr, expr->expr_text);
+      filterx_expr_unref(self);
+      return filterx_expr_ref(expr);
+    }
+  else
+    {
+      fprintf(stderr, "registering expr %s %p  [%s]\n", self->type, self, self->expr_text);
+      g_hash_table_insert(deduplicated_exprs, self, filterx_expr_ref(self));
+      self->deduplicated = TRUE;
+      return self;
+    }
+}
+
+FilterXExpr *
 filterx_expr_optimize(FilterXExpr *self)
 {
   if (!self || self->optimized)
@@ -341,6 +381,8 @@ filterx_expr_optimize(FilterXExpr *self)
 void
 filterx_expr_free_method(FilterXExpr *self)
 {
+//fprintf(stderr, "freeing expr %s %p  [%s]\n", self->type, self, self->expr_text);
+
   g_free(self->lloc);
   g_free(self->expr_text);
 }
