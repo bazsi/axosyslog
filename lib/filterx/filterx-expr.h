@@ -242,6 +242,8 @@ FilterXExpr *filterx_expr_new(void);
 FilterXExpr *filterx_expr_ref(FilterXExpr *self);
 void filterx_expr_unref(FilterXExpr *self);
 FilterXObject *filterx_expr_plus_assign_method(FilterXExpr *self, FilterXObject *value);
+gboolean filterx_expr_equal_to_method(FilterXExpr *self, FilterXExpr *other);
+guint filterx_expr_hash_method(FilterXExpr *self);
 void filterx_expr_free_method(FilterXExpr *self);
 
 gboolean filterx_expr_init_method(FilterXExpr *self, GlobalConfig *cfg);

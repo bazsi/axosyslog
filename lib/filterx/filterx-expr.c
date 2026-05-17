@@ -125,6 +125,61 @@ filterx_expr_move_method(FilterXExpr *self)
   return result;
 }
 
+static gboolean
+_collect_child_exprs(FilterXExpr *parent, FilterXExpr **child, gpointer user_data)
+{
+  GPtrArray *children = user_data;
+
+  g_ptr_array_add(children, *child);
+  return TRUE;
+}
+
+guint
+filterx_expr_hash_method(FilterXExpr *self)
+{
+  GPtrArray *children = g_ptr_array_new();
+
+  filterx_expr_walk_children(self, _collect_child_exprs, children);
+
+  gulong result = g_direct_hash(NULL);
+  for (gsize i = 0; i < children->len; i++)
+    {
+      gpointer a;
+      a = g_ptr_array_index(children, i);
+      result += g_direct_hash(a);
+    }
+
+  g_ptr_array_unref(children);
+  return result;
+}
+
+gboolean
+filterx_expr_equal_to_method(FilterXExpr *self, FilterXExpr *other)
+{
+  GPtrArray *children = g_ptr_array_new();
+  GPtrArray *other_children = g_ptr_array_new();
+
+  filterx_expr_walk_children(self, _collect_child_exprs, children);
+  filterx_expr_walk_children(other, _collect_child_exprs, other_children);
+
+  if (children->len != other_children->len)
+    return FALSE;
+
+  for (gsize i = 0; i < children->len; i++)
+    {
+      gpointer a, b;
+      a = g_ptr_array_index(children, i);
+      b = g_ptr_array_index(other_children, i);
+
+      if (a != b)
+        return FALSE;
+    }
+
+  g_ptr_array_unref(children);
+  g_ptr_array_unref(other_children);
+  return TRUE;
+}
+
 static void
 _init_sc_key_name(FilterXExpr *self, gchar *buf, gsize buf_len)
 {
@@ -299,6 +354,8 @@ filterx_expr_init_instance(FilterXExpr *self, const gchar *type, FilterXEffect e
   self->move = filterx_expr_move_method;
   self->free_fn = filterx_expr_free_method;
   self->plus_assign = filterx_expr_plus_assign_method;
+  self->equal_to = filterx_expr_equal_to_method;
+  self->hash = filterx_expr_hash_method;
   self->type = type;
   self->effects = effects;
 }
