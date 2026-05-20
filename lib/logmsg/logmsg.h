@@ -376,7 +376,7 @@ log_msg_update_ack_and_ref_and_abort_and_suspended(LogMessage *self, gint add_re
   gint old_value, new_value;
   do
     {
-      new_value = old_value = (volatile gint) self->ack_and_ref_and_abort_and_suspended;
+      new_value = old_value = self->ack_and_ref_and_abort_and_suspended;
       new_value = (new_value & ~LOGMSG_REFCACHE_REF_MASK)   + LOGMSG_REFCACHE_REF_TO_VALUE(  (LOGMSG_REFCACHE_VALUE_TO_REF(
                     old_value)   + add_ref));
       new_value = (new_value & ~LOGMSG_REFCACHE_ACK_MASK)   + LOGMSG_REFCACHE_ACK_TO_VALUE(  (LOGMSG_REFCACHE_VALUE_TO_ACK(

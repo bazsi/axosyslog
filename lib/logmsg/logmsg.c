@@ -1506,7 +1506,7 @@ log_msg_drop(LogMessage *msg, const LogPathOptions *path_options, AckType ack_ty
   log_msg_unref(msg);
 }
 
-static AckType
+static inline AckType
 _ack_and_ref_and_abort_and_suspend_to_acktype(gint value)
 {
   AckType type = AT_PROCESSED;
