@@ -121,26 +121,42 @@ _flow_control_rate_adjust(LogSource *self)
               clock_gettime(CLOCK_MONOTONIC, &now);
               if (now.tv_sec > self->last_ack_rate_time.tv_sec + 6)
                 {
-                  /* last check was too far apart, this means the rate is quite slow. turn off sleeping. */
+                  /* last check was too far apart (at least 7 seconds), this
+                   * means the rate is quite slow (less than 2340/sec).
+                   * disable sleeping, we are far from being overloaded.
+                   */
+
                   self->window_full_sleep_nsec = 0;
                   self->last_ack_rate_time = now;
                 }
               else
                 {
-                  /* ok, we seem to have a close enough measurement, this means
-                   * we do have a high rate.  Calculate how much we should sleep
-                   * in case the window gets full */
+
+                  /* ok, we seem to be running at more than 2340 eps (e.g.
+                   * 0.42msec/message), this means we do have a high rate.
+                   * Since going back to the main loop is expensive, let's
+                   * see how much time we should wait for a slot to clear
+                   * from our window.
+                   */
 
                   diff = timespec_diff_nsec(&now, &self->last_ack_rate_time);
                   self->window_full_sleep_nsec = (diff / (cur_ack_count - last_ack_count));
                   if (self->window_full_sleep_nsec > 1e6)
                     {
-                      /* in case we'd be waiting for 1msec for another free slot in the window, let's go to background instead */
+                      /* in case we'd be waiting for more than 1msec for
+                       * another free slot in the window, let's go to
+                       * background instead.  This should never happen, but
+                       * I am reluctant to add an assert here, just disable
+                       * sleeping */
+
                       self->window_full_sleep_nsec = 0;
                     }
                   else
                     {
-                      /* otherwise let's wait for about 8 message to be emptied before going back to the loop, but clamp the maximum time to 0.1msec */
+                      /* otherwise let's wait for about 16 messages to be
+                       * emptied before going back to the loop, but clamp
+                       * the maximum time to 1msec */
+
                       self->window_full_sleep_nsec <<= 4;
                       if (self->window_full_sleep_nsec > 1e6)
                         self->window_full_sleep_nsec = 1e6;
