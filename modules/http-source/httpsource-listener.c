@@ -21,11 +21,11 @@
  */
 
 #include "httpsource-listener.h"
+#include "httpsource.h"
+#include "mainloop-threaded-worker.h"
 #include "messages.h"
 #include "atomic.h"
 #include "gsockaddr.h"
-#include "logsource.h"
-#include "logmsg/logmsg.h"
 
 #include <microhttpd.h>
 
@@ -48,7 +48,7 @@
 
 typedef struct _PathRegistration
 {
-  LogThreadedSourceWorker *worker;
+  HTTPSourceDriver *source;
   gsize max_request_size;
 } PathRegistration;
 
@@ -66,6 +66,8 @@ struct HTTPServerListener
   GMutex lock;
   GHashTable *paths;            /* path (owned gchar *) -> PathRegistration * */
 
+  MainLoopThreadedWorker thread;
+  gboolean thread_started;
   GAtomicCounter stop_requested;
   gint wakeup_pipe[2];
 };
@@ -76,8 +78,9 @@ static GHashTable *registry;    /* key (owned gchar *) -> HTTPServerListener * *
 typedef struct _RequestContext
 {
   GString *body;
+  gsize offset;
   gchar *path;
-  gsize max_request_size;
+  GSockAddr *peer;
   gboolean too_large;
 } RequestContext;
 
@@ -113,68 +116,16 @@ _extract_peer_addr(struct MHD_Connection *connection)
   return g_sockaddr_new(sa, salen);
 }
 
-static void
-_post_line(LogThreadedSourceWorker *worker, const gchar *line, gsize length, GSockAddr *peer)
+static HTTPSourceDriver *
+_lookup_source(HTTPServerListener *self, const gchar *path, gsize *max_request_size)
 {
-  LogMessage *msg = log_msg_new_empty();
-  log_msg_set_value(msg, LM_V_MESSAGE, line, length);
-
-  if (peer)
-    log_msg_set_saddr_ref(msg, g_sockaddr_ref(peer));
-
-  log_threaded_source_worker_blocking_post(worker, msg);
-}
-
-/* Split the body at newlines and post each non-empty line as a separate
- * message.  A trailing CR (CRLF line endings) is stripped. */
-static void
-_post_body_as_lines(LogThreadedSourceWorker *worker, GString *body, GSockAddr *peer)
-{
-  const gchar *p = body->str;
-  const gchar *end = body->str + body->len;
-
-  while (p < end)
-    {
-      const gchar *nl = memchr(p, '\n', end - p);
-      const gchar *line_end = nl ? nl : end;
-      gsize length = line_end - p;
-
-      if (length > 0 && p[length - 1] == '\r')
-        length--;
-
-      if (length > 0)
-        _post_line(worker, p, length, peer);
-
-      if (!nl)
-        break;
-      p = nl + 1;
-    }
-}
-
-static enum MHD_Result
-_process_request(HTTPServerListener *self, struct MHD_Connection *connection, RequestContext *ctx)
-{
-  if (ctx->too_large)
-    return _send_response(connection, HTTP_STATUS_TOO_LARGE, RESPONSE_TOO_LARGE);
-
-  /* By the time we process a request the worker threads are running and no
-   * (un)registration happens, so holding the lock across posting is safe:
-   * the owner thread is the only dispatcher and (un)registration only runs
-   * before workers start / after they exit. */
   g_mutex_lock(&self->lock);
-  PathRegistration *reg = g_hash_table_lookup(self->paths, ctx->path);
-  if (!reg)
-    {
-      g_mutex_unlock(&self->lock);
-      return _send_response(connection, MHD_HTTP_NOT_FOUND, RESPONSE_NOT_FOUND);
-    }
-
-  GSockAddr *peer = _extract_peer_addr(connection);
-  _post_body_as_lines(reg->worker, ctx->body, peer);
-  g_sockaddr_unref(peer);
+  PathRegistration *reg = g_hash_table_lookup(self->paths, path);
+  HTTPSourceDriver *source = reg ? reg->source : NULL;
+  if (reg && max_request_size)
+    *max_request_size = reg->max_request_size;
   g_mutex_unlock(&self->lock);
-
-  return _send_response(connection, MHD_HTTP_OK, RESPONSE_OK);
+  return source;
 }
 
 static enum MHD_Result
@@ -190,25 +141,22 @@ _handle_request(void *cls, struct MHD_Connection *connection,
       if (strcmp(method, MHD_HTTP_METHOD_POST) != 0)
         return _send_response(connection, MHD_HTTP_METHOD_NOT_ALLOWED, RESPONSE_METHOD_NOT_ALLOWED);
 
-      g_mutex_lock(&self->lock);
-      PathRegistration *reg = g_hash_table_lookup(self->paths, url);
-      gsize max_request_size = reg ? reg->max_request_size : 0;
-      g_mutex_unlock(&self->lock);
-
-      if (!reg)
+      if (!_lookup_source(self, url, NULL))
         return _send_response(connection, MHD_HTTP_NOT_FOUND, RESPONSE_NOT_FOUND);
 
       ctx = g_new0(RequestContext, 1);
       ctx->body = g_string_sized_new(1024);
       ctx->path = g_strdup(url);
-      ctx->max_request_size = max_request_size;
       *con_cls = ctx;
       return MHD_YES;
     }
 
   if (*upload_data_size != 0)
     {
-      if (ctx->max_request_size && ctx->body->len + *upload_data_size > ctx->max_request_size)
+      gsize max_request_size = 0;
+      _lookup_source(self, ctx->path, &max_request_size);
+
+      if (max_request_size && ctx->body->len + *upload_data_size > max_request_size)
         ctx->too_large = TRUE;
       else
         g_string_append_len(ctx->body, upload_data, *upload_data_size);
@@ -217,25 +165,47 @@ _handle_request(void *cls, struct MHD_Connection *connection,
       return MHD_YES;
     }
 
-  return _process_request(self, connection, ctx);
+  if (ctx->too_large)
+    return _send_response(connection, HTTP_STATUS_TOO_LARGE, RESPONSE_TOO_LARGE);
+
+  HTTPSourceDriver *source = _lookup_source(self, ctx->path, NULL);
+  if (!source)
+    return _send_response(connection, MHD_HTTP_NOT_FOUND, RESPONSE_NOT_FOUND);
+
+  if (!ctx->peer)
+    ctx->peer = _extract_peer_addr(connection);
+
+  HTTPSourcePostStatus status =
+    http_sd_post_body(source, connection, ctx->body->str, ctx->body->len, &ctx->offset, ctx->peer);
+
+  if (status == HTTP_SD_POST_SUSPENDED)
+    return MHD_YES;
+
+  return _send_response(connection, MHD_HTTP_OK, RESPONSE_OK);
 }
 
 static void
 _request_completed(void *cls, struct MHD_Connection *connection,
                    void **con_cls, enum MHD_RequestTerminationCode toe)
 {
+  HTTPServerListener *self = (HTTPServerListener *) cls;
   RequestContext *ctx = (RequestContext *) *con_cls;
   if (!ctx)
     return;
 
+  HTTPSourceDriver *source = ctx->path ? _lookup_source(self, ctx->path, NULL) : NULL;
+  if (source)
+    http_sd_forget_connection(source, connection);
+
   g_string_free(ctx->body, TRUE);
   g_free(ctx->path);
+  g_sockaddr_unref(ctx->peer);
   g_free(ctx);
   *con_cls = NULL;
 }
 
-void
-http_server_listener_drive(HTTPServerListener *self)
+static void
+_drive(HTTPServerListener *self)
 {
   while (!g_atomic_counter_get(&self->stop_requested))
     {
@@ -284,19 +254,46 @@ http_server_listener_drive(HTTPServerListener *self)
     }
 }
 
-void
-http_server_listener_request_stop(HTTPServerListener *self)
+static void
+_request_stop(HTTPServerListener *self)
 {
   g_atomic_counter_set(&self->stop_requested, 1);
+  http_server_listener_wakeup(self);
+}
 
+void
+http_server_listener_wakeup(HTTPServerListener *self)
+{
   gchar c = 'x';
   if (write(self->wakeup_pipe[1], &c, 1) < 0)
     ;
 }
 
+static void
+_listener_thread_run(MainLoopThreadedWorker *t)
+{
+  _drive((HTTPServerListener *) t->data);
+}
+
+static void
+_listener_thread_request_exit(MainLoopThreadedWorker *t)
+{
+  _request_stop((HTTPServerListener *) t->data);
+}
+
+gboolean
+http_server_listener_start(HTTPServerListener *self)
+{
+  if (self->thread_started)
+    return TRUE;
+
+  self->thread_started = TRUE;
+  return main_loop_threaded_worker_start(&self->thread);
+}
+
 gboolean
 http_server_listener_register_path(HTTPServerListener *self, const gchar *path,
-                                   LogThreadedSourceWorker *worker, gsize max_request_size)
+                                   HTTPSourceDriver *source, gsize max_request_size)
 {
   g_mutex_lock(&self->lock);
 
@@ -306,7 +303,7 @@ http_server_listener_register_path(HTTPServerListener *self, const gchar *path,
                 evt_tag_str("path", path), evt_tag_int("port", self->port));
 
   PathRegistration *reg = g_new0(PathRegistration, 1);
-  reg->worker = worker;
+  reg->source = source;
   reg->max_request_size = max_request_size;
   g_hash_table_insert(self->paths, g_strdup(path), reg);
 
@@ -316,14 +313,14 @@ http_server_listener_register_path(HTTPServerListener *self, const gchar *path,
 
 void
 http_server_listener_unregister_path(HTTPServerListener *self, const gchar *path,
-                                      LogThreadedSourceWorker *worker)
+                                      HTTPSourceDriver *source)
 {
   g_mutex_lock(&self->lock);
 
   PathRegistration *reg = g_hash_table_lookup(self->paths, path);
-  /* only remove the entry if it still points to our worker; during a reload
+  /* only remove the entry if it still points to our source; during a reload
    * a freshly initialized source may have already taken over this path */
-  if (reg && reg->worker == worker)
+  if (reg && reg->source == source)
     g_hash_table_remove(self->paths, path);
 
   g_mutex_unlock(&self->lock);
@@ -385,11 +382,13 @@ _start_daemon_with_flags(HTTPServerListener *self, unsigned int flags)
 static gboolean
 _start_daemon(HTTPServerListener *self)
 {
-  /* when listening on all interfaces, prefer a dual-stack (IPv4 + IPv6)
-   * socket, but fall back to IPv4-only on hosts without IPv6 support */
+  /* external-polling mode (we drive MHD_run from our own thread) with
+   * suspend/resume enabled for per-connection flow control */
+  unsigned int base_flags = MHD_ALLOW_SUSPEND_RESUME;
+
   if (!self->has_bind_sa)
     {
-      self->daemon = _start_daemon_with_flags(self, MHD_USE_DUAL_STACK);
+      self->daemon = _start_daemon_with_flags(self, base_flags | MHD_USE_DUAL_STACK);
       if (self->daemon)
         return TRUE;
 
@@ -397,7 +396,7 @@ _start_daemon(HTTPServerListener *self)
                 evt_tag_int("port", self->port));
     }
 
-  self->daemon = _start_daemon_with_flags(self, MHD_NO_FLAG);
+  self->daemon = _start_daemon_with_flags(self, base_flags);
   if (!self->daemon)
     {
       msg_error("http(): failed to start HTTP listener",
@@ -436,6 +435,10 @@ _listener_new(const gchar *key, const gchar *bind_addr, gint port)
   if (!_start_daemon(self))
     goto error;
 
+  main_loop_threaded_worker_init(&self->thread, MLW_THREADED_INPUT_WORKER, self);
+  self->thread.run = _listener_thread_run;
+  self->thread.request_exit = _listener_thread_request_exit;
+
   return self;
 
 error:
@@ -454,6 +457,12 @@ error:
 static void
 _listener_free(HTTPServerListener *self)
 {
+  if (self->thread_started)
+    {
+      _request_stop(self);
+      main_loop_threaded_worker_clear(&self->thread);
+    }
+
   if (self->daemon)
     MHD_stop_daemon(self->daemon);
 
@@ -470,10 +479,8 @@ _listener_free(HTTPServerListener *self)
 }
 
 HTTPServerListener *
-http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint port, gboolean *created)
+http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint port)
 {
-  *created = FALSE;
-
   gchar *key = g_strdup_printf("%p/%s:%d", (void *) cfg, bind_addr ? bind_addr : "", port);
 
   g_mutex_lock(&registry_lock);
@@ -491,10 +498,7 @@ http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint por
 
   self = _listener_new(key, bind_addr, port);
   if (self)
-    {
-      g_hash_table_insert(registry, self->key, self);
-      *created = TRUE;
-    }
+    g_hash_table_insert(registry, self->key, self);
 
   g_mutex_unlock(&registry_lock);
   g_free(key);

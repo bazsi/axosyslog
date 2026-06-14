@@ -24,36 +24,37 @@
 #define HTTPSOURCE_LISTENER_H
 
 #include "syslog-ng.h"
-#include "logthrsource/logthrsourcedrv.h"
 
 typedef struct HTTPServerListener HTTPServerListener;
+typedef struct HTTPSourceDriver HTTPSourceDriver;
 
 /*
  * A shared HTTP listener, keyed by (config, bind address, port).  Multiple
- * http() sources that listen on the same address:port share a single
- * listener (and a single underlying libmicrohttpd daemon), each registering
- * its own URL path.
+ * http() sources listening on the same address:port share a single listener
+ * (and a single libmicrohttpd daemon), each registering its own URL path.
  *
- * The lifetime is reference counted.  The first source to acquire a given
- * address:port creates the daemon (and becomes the "owner" that drives the
- * event loop in its worker thread, see http_server_listener_drive()).  The
- * daemon is torn down when the last reference is released.
+ * The listener owns one dedicated, syslog-ng-registered thread that drives
+ * libmicrohttpd in external-polling mode.  Request handlers run on that thread
+ * and post messages directly into the matching source's LogSource (the
+ * destination-side queue is multi-producer safe).  Flow control is applied
+ * per connection using libmicrohttpd's suspend/resume facility, so a full
+ * window on one URL never blocks the others sharing the port.
  *
- * acquire()/release()/register_path()/unregister_path() must be called from
- * the main thread (during driver init/deinit).
+ * acquire()/release()/register_path()/unregister_path()/start() are called
+ * from the main thread during driver init/deinit. wakeup() is thread-safe.
  */
-HTTPServerListener *http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint port,
-                                                 gboolean *created);
+HTTPServerListener *http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint port);
 void http_server_listener_release(HTTPServerListener *self);
 
-gboolean http_server_listener_register_path(HTTPServerListener *self, const gchar *path,
-                                             LogThreadedSourceWorker *worker, gsize max_request_size);
-void http_server_listener_unregister_path(HTTPServerListener *self, const gchar *path,
-                                           LogThreadedSourceWorker *worker);
+/* start the listener thread (idempotent); call from post_config_init */
+gboolean http_server_listener_start(HTTPServerListener *self);
 
-/* drive the libmicrohttpd event loop until http_server_listener_request_stop()
- * is called; must run in a syslog-ng worker thread (the owner's run loop) */
-void http_server_listener_drive(HTTPServerListener *self);
-void http_server_listener_request_stop(HTTPServerListener *self);
+gboolean http_server_listener_register_path(HTTPServerListener *self, const gchar *path,
+                                             HTTPSourceDriver *source, gsize max_request_size);
+void http_server_listener_unregister_path(HTTPServerListener *self, const gchar *path,
+                                           HTTPSourceDriver *source);
+
+/* wake the event loop so it processes connections resumed from another thread */
+void http_server_listener_wakeup(HTTPServerListener *self);
 
 #endif

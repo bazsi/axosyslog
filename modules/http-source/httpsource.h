@@ -26,8 +26,17 @@
 #include "syslog-ng.h"
 #include "driver.h"
 #include "logsource.h"
+#include "gsockaddr.h"
+
+struct MHD_Connection;
 
 typedef struct HTTPSourceDriver HTTPSourceDriver;
+
+typedef enum
+{
+  HTTP_SD_POST_DONE,       /* the whole body was posted */
+  HTTP_SD_POST_SUSPENDED,  /* the source window is full, the connection was suspended */
+} HTTPSourcePostStatus;
 
 LogDriver *http_sd_new(GlobalConfig *cfg);
 
@@ -35,5 +44,19 @@ void http_sd_set_port(LogDriver *s, gint port);
 void http_sd_set_bind_addr(LogDriver *s, const gchar *addr);
 void http_sd_set_path(LogDriver *s, const gchar *path);
 void http_sd_set_max_request_size(LogDriver *s, gsize size);
+
+/*
+ * Called by the listener thread to post a request body as messages.  Posting
+ * starts at *offset and the offset is advanced as lines are accepted.  If the
+ * source's flow-control window fills up, the connection is suspended (via
+ * MHD_suspend_connection()) and HTTP_SD_POST_SUSPENDED is returned; the
+ * connection is resumed automatically once the window reopens, and the
+ * listener will be called again to continue from *offset.
+ */
+HTTPSourcePostStatus http_sd_post_body(HTTPSourceDriver *self, struct MHD_Connection *connection,
+                                       const gchar *body, gsize body_len, gsize *offset, GSockAddr *peer);
+
+/* drop a connection from the suspended set (e.g. when the request terminates) */
+void http_sd_forget_connection(HTTPSourceDriver *self, struct MHD_Connection *connection);
 
 #endif

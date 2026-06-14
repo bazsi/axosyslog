@@ -23,8 +23,12 @@
 #include "httpsource.h"
 #include "httpsource-listener.h"
 #include "logthrsource/logthrsourcedrv.h"
+#include "mainloop-worker.h"
 #include "messages.h"
 #include "stats/stats-cluster-key-builder.h"
+#include "logmsg/logmsg.h"
+
+#include <microhttpd.h>
 
 #define DEFAULT_MAX_REQUEST_SIZE (8 * 1024 * 1024)
 
@@ -38,47 +42,111 @@ struct HTTPSourceDriver
   gsize max_request_size;
 
   HTTPServerListener *listener;
-  gboolean is_owner;
   LogThreadedSourceWorker *worker;
 
-  /* parking primitives for the non-owning worker thread */
-  GMutex park_lock;
-  GCond park_cond;
-  gboolean exit_requested;
+  /* connections suspended because this source's flow-control window is full;
+   * accessed from the listener thread (suspend) and the ack path (resume) */
+  GMutex backpressure_lock;
+  GList *suspended_connections;
 };
 
-/* runs in the worker thread */
+/*
+ * Called from the flow-control/ack path (LogSource wakeup) when the window
+ * reopens.  Resume every connection that was suspended waiting on this source
+ * and nudge the listener loop so it processes them.
+ */
 static void
-_worker_run(LogThreadedSourceWorker *w)
+_resume_suspended_connections(LogThreadedSourceWorker *worker)
 {
-  HTTPSourceDriver *self = (HTTPSourceDriver *) w->control;
+  HTTPSourceDriver *self = (HTTPSourceDriver *) worker->control;
 
-  if (self->is_owner)
+  g_mutex_lock(&self->backpressure_lock);
+  GList *to_resume = self->suspended_connections;
+  self->suspended_connections = NULL;
+  g_mutex_unlock(&self->backpressure_lock);
+
+  if (!to_resume)
+    return;
+
+  for (GList *l = to_resume; l; l = l->next)
+    MHD_resume_connection((struct MHD_Connection *) l->data);
+  g_list_free(to_resume);
+
+  if (self->listener)
+    http_server_listener_wakeup(self->listener);
+}
+
+HTTPSourcePostStatus
+http_sd_post_body(HTTPSourceDriver *self, struct MHD_Connection *connection,
+                  const gchar *body, gsize body_len, gsize *offset, GSockAddr *peer)
+{
+  while (*offset < body_len)
     {
-      http_server_listener_drive(self->listener);
-      return;
+      const gchar *p = body + *offset;
+      const gchar *nl = memchr(p, '\n', body_len - *offset);
+      gsize seg_len = nl ? (gsize) (nl - p) : (body_len - *offset);
+      gsize advance = nl ? seg_len + 1 : seg_len;
+
+      gsize line_len = seg_len;
+      if (line_len > 0 && p[line_len - 1] == '\r')
+        line_len--;
+
+      if (line_len == 0)
+        {
+          *offset += advance;
+          continue;
+        }
+
+      /* fast path check, then re-check under the lock to close the race with
+       * a concurrent window reopen (_resume_suspended_connections) */
+      if (!log_threaded_source_worker_free_to_send(self->worker))
+        {
+          g_mutex_lock(&self->backpressure_lock);
+          if (!log_threaded_source_worker_free_to_send(self->worker))
+            {
+              MHD_suspend_connection(connection);
+              self->suspended_connections = g_list_prepend(self->suspended_connections, connection);
+              g_mutex_unlock(&self->backpressure_lock);
+              return HTTP_SD_POST_SUSPENDED;
+            }
+          g_mutex_unlock(&self->backpressure_lock);
+        }
+
+      LogMessage *msg = log_msg_new_empty();
+      log_msg_set_value(msg, LM_V_MESSAGE, p, line_len);
+      if (peer)
+        log_msg_set_saddr_ref(msg, g_sockaddr_ref(peer));
+      log_threaded_source_worker_post(self->worker, msg);
+
+      *offset += advance;
     }
 
-  /* a non-owning worker has nothing to do itself: the owner's thread drives
-   * the shared listener and posts into this source's LogSource directly */
-  g_mutex_lock(&self->park_lock);
-  while (!self->exit_requested)
-    g_cond_wait(&self->park_cond, &self->park_lock);
-  g_mutex_unlock(&self->park_lock);
+  return HTTP_SD_POST_DONE;
+}
+
+void
+http_sd_forget_connection(HTTPSourceDriver *self, struct MHD_Connection *connection)
+{
+  g_mutex_lock(&self->backpressure_lock);
+  self->suspended_connections = g_list_remove(self->suspended_connections, connection);
+  g_mutex_unlock(&self->backpressure_lock);
 }
 
 static void
-_worker_request_exit(LogThreadedSourceWorker *w)
+_resume_and_clear_all(HTTPSourceDriver *self)
 {
-  HTTPSourceDriver *self = (HTTPSourceDriver *) w->control;
+  g_mutex_lock(&self->backpressure_lock);
+  GList *to_resume = self->suspended_connections;
+  self->suspended_connections = NULL;
+  g_mutex_unlock(&self->backpressure_lock);
 
-  g_mutex_lock(&self->park_lock);
-  self->exit_requested = TRUE;
-  g_cond_signal(&self->park_cond);
-  g_mutex_unlock(&self->park_lock);
+  gboolean had_any = (to_resume != NULL);
+  for (GList *l = to_resume; l; l = l->next)
+    MHD_resume_connection((struct MHD_Connection *) l->data);
+  g_list_free(to_resume);
 
-  if (self->is_owner)
-    http_server_listener_request_stop(self->listener);
+  if (had_any && self->listener)
+    http_server_listener_wakeup(self->listener);
 }
 
 static LogThreadedSourceWorker *
@@ -89,8 +157,9 @@ _construct_worker(LogThreadedSourceDriver *s, gint worker_index)
   LogThreadedSourceWorker *worker = g_new0(LogThreadedSourceWorker, 1);
   log_threaded_source_worker_init_instance(worker, s, worker_index);
 
-  worker->run = _worker_run;
-  worker->request_exit = _worker_request_exit;
+  /* the worker thread is never started: the shared listener thread is the
+   * producer.  We only need the worker as a LogSource and its wakeup hook. */
+  worker->wakeup = _resume_suspended_connections;
 
   self->worker = worker;
   return worker;
@@ -109,6 +178,28 @@ _format_stats_key(LogThreadedSourceDriver *s, StatsClusterKeyBuilder *kb)
 
   if (self->path)
     stats_cluster_key_builder_add_legacy_label(kb, stats_cluster_label("path", self->path));
+}
+
+static gboolean
+_pre_config_init(LogPipe *s)
+{
+  /* The per-source worker threads are never started (the shared listener
+   * thread is the producer), so we only reserve a slot for the listener
+   * thread itself.  Over-allocating when several sources share a listener is
+   * harmless. */
+  main_loop_worker_allocate_thread_space(1);
+  return TRUE;
+}
+
+static gboolean
+_post_config_init(LogPipe *s)
+{
+  HTTPSourceDriver *self = (HTTPSourceDriver *) s;
+
+  if (!self->listener)
+    return FALSE;
+
+  return http_server_listener_start(self->listener);
 }
 
 static gboolean
@@ -133,14 +224,11 @@ _init(LogPipe *s)
   if (!log_threaded_source_driver_init_method(s))
     return FALSE;
 
-  gboolean created = FALSE;
-  self->listener = http_server_listener_acquire(cfg, self->bind_addr, self->port, &created);
+  self->listener = http_server_listener_acquire(cfg, self->bind_addr, self->port);
   if (!self->listener)
     return FALSE;
 
-  self->is_owner = created;
-  http_server_listener_register_path(self->listener, self->path, self->worker, self->max_request_size);
-
+  http_server_listener_register_path(self->listener, self->path, self, self->max_request_size);
   return TRUE;
 }
 
@@ -150,7 +238,10 @@ _deinit(LogPipe *s)
   HTTPSourceDriver *self = (HTTPSourceDriver *) s;
 
   if (self->listener)
-    http_server_listener_unregister_path(self->listener, self->path, self->worker);
+    http_server_listener_unregister_path(self->listener, self->path, self);
+
+  /* unblock any connection still waiting on our window so it can finish */
+  _resume_and_clear_all(self);
 
   gboolean result = log_threaded_source_driver_deinit_method(s);
 
@@ -170,8 +261,8 @@ _free(LogPipe *s)
 
   g_free(self->bind_addr);
   g_free(self->path);
-  g_mutex_clear(&self->park_lock);
-  g_cond_clear(&self->park_cond);
+  g_list_free(self->suspended_connections);
+  g_mutex_clear(&self->backpressure_lock);
 
   log_threaded_source_driver_free_method(s);
 }
@@ -214,12 +305,13 @@ http_sd_new(GlobalConfig *cfg)
 
   self->bind_addr = g_strdup("0.0.0.0");
   self->max_request_size = DEFAULT_MAX_REQUEST_SIZE;
-  g_mutex_init(&self->park_lock);
-  g_cond_init(&self->park_cond);
+  g_mutex_init(&self->backpressure_lock);
 
   self->super.super.super.super.init = _init;
   self->super.super.super.super.deinit = _deinit;
   self->super.super.super.super.free_fn = _free;
+  self->super.super.super.super.pre_config_init = _pre_config_init;
+  self->super.super.super.super.post_config_init = _post_config_init;
   self->super.format_stats_key = _format_stats_key;
   self->super.worker_construct = _construct_worker;
 
