@@ -407,20 +407,9 @@ _start_daemon(HTTPServerListener *self)
   return TRUE;
 }
 
-static HTTPServerListener *
-_listener_new(const gchar *key, const gchar *bind_addr, gint port)
+static gboolean
+_listener_start(HTTPServerListener *self)
 {
-  HTTPServerListener *self = g_new0(HTTPServerListener, 1);
-  self->key = g_strdup(key);
-  self->bind_addr = g_strdup(bind_addr ? bind_addr : "");
-  self->port = port;
-  self->ref_count = 1;
-  g_mutex_init(&self->lock);
-  g_atomic_counter_set(&self->stop_requested, 0);
-  self->wakeup_pipe[0] = -1;
-  self->wakeup_pipe[1] = -1;
-  self->paths = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
-
   if (pipe(self->wakeup_pipe) < 0)
     {
       msg_error("http(): failed to create wakeup pipe for listener", evt_tag_error("error"));
@@ -429,33 +418,26 @@ _listener_new(const gchar *key, const gchar *bind_addr, gint port)
   fcntl(self->wakeup_pipe[0], F_SETFL, O_NONBLOCK);
   fcntl(self->wakeup_pipe[1], F_SETFL, O_NONBLOCK);
 
-  if (!_resolve_bind_addr(self, bind_addr))
+  if (!_resolve_bind_addr(self, self->bind_addr))
     goto error;
 
   if (!_start_daemon(self))
     goto error;
 
-  main_loop_threaded_worker_init(&self->thread, MLW_THREADED_INPUT_WORKER, self);
-  self->thread.run = _listener_thread_run;
-  self->thread.request_exit = _listener_thread_request_exit;
-
-  return self;
+  return TRUE;
 
 error:
   if (self->wakeup_pipe[0] >= 0)
     close(self->wakeup_pipe[0]);
   if (self->wakeup_pipe[1] >= 0)
     close(self->wakeup_pipe[1]);
-  g_hash_table_unref(self->paths);
-  g_mutex_clear(&self->lock);
-  g_free(self->key);
-  g_free(self->bind_addr);
-  g_free(self);
-  return NULL;
+  self->wakeup_pipe[0] = -1;
+  self->wakeup_pipe[1] = -1;
+  return FALSE;
 }
 
 static void
-_listener_free(HTTPServerListener *self)
+_listener_stop(HTTPServerListener *self)
 {
   if (self->thread_started)
     {
@@ -470,7 +452,35 @@ _listener_free(HTTPServerListener *self)
     close(self->wakeup_pipe[0]);
   if (self->wakeup_pipe[1] >= 0)
     close(self->wakeup_pipe[1]);
+  self->wakeup_pipe[0] = -1;
+  self->wakeup_pipe[1] = -1;
+}
 
+static HTTPServerListener *
+_listener_new(const gchar *key, const gchar *bind_addr, gint port)
+{
+  HTTPServerListener *self = g_new0(HTTPServerListener, 1);
+
+  self->ref_count = 1;
+  self->key = g_strdup(key);
+  self->bind_addr = g_strdup(bind_addr ? bind_addr : "");
+  self->port = port;
+  g_mutex_init(&self->lock);
+  g_atomic_counter_set(&self->stop_requested, 0);
+  self->wakeup_pipe[0] = -1;
+  self->wakeup_pipe[1] = -1;
+  self->paths = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+
+  main_loop_threaded_worker_init(&self->thread, MLW_THREADED_INPUT_WORKER, self);
+  self->thread.run = _listener_thread_run;
+  self->thread.request_exit = _listener_thread_request_exit;
+  return self;
+}
+
+static void
+_listener_free(HTTPServerListener *self)
+{
+  g_assert(self->wakeup_pipe[0] == -1);
   g_hash_table_unref(self->paths);
   g_mutex_clear(&self->lock);
   g_free(self->key);
@@ -485,39 +495,44 @@ http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint por
 
   g_mutex_lock(&registry_lock);
   if (!registry)
-    registry = g_hash_table_new(g_str_hash, g_str_equal);
+    registry = g_hash_table_new_full(g_str_hash, g_str_equal, NULL, (GDestroyNotify) _listener_free);
 
-  HTTPServerListener *self = g_hash_table_lookup(registry, key);
-  if (self)
+  HTTPServerListener *listener = g_hash_table_lookup(registry, key);
+  if (listener)
+    listener->ref_count++;
+  g_mutex_unlock(&registry_lock);
+
+  if (!listener)
     {
-      self->ref_count++;
-      g_mutex_unlock(&registry_lock);
-      g_free(key);
-      return self;
+      listener = _listener_new(key, bind_addr, port);
+      if (_listener_start(listener))
+        {
+          g_mutex_lock(&registry_lock);
+          g_hash_table_insert(registry, listener->key, listener);
+          g_mutex_unlock(&registry_lock);
+        }
+      else
+        {
+          _listener_free(listener);
+          listener = NULL;
+        }
     }
 
-  self = _listener_new(key, bind_addr, port);
-  if (self)
-    g_hash_table_insert(registry, self->key, self);
-
-  g_mutex_unlock(&registry_lock);
   g_free(key);
-  return self;
+  return listener;
 }
 
 void
-http_server_listener_release(HTTPServerListener *self)
+http_server_listener_release(HTTPServerListener *listener)
 {
-  if (!self)
-    return;
-
   g_mutex_lock(&registry_lock);
-  if (--self->ref_count == 0)
+  if (listener->ref_count == 1)
     {
-      g_hash_table_remove(registry, self->key);
-      g_mutex_unlock(&registry_lock);
-      _listener_free(self);
-      return;
+      /* last reference should destruct and free the listener */
+      _listener_stop(listener);
+      g_hash_table_remove(registry, listener->key);
     }
+  else
+    listener->ref_count--;
   g_mutex_unlock(&registry_lock);
 }
