@@ -20,8 +20,8 @@
  *
  */
 
-#ifndef HTTPSOURCE_LISTENER_H
-#define HTTPSOURCE_LISTENER_H
+#ifndef HTTP_LISTENER_H
+#define HTTP_LISTENER_H
 
 #include "syslog-ng.h"
 

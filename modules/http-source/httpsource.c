@@ -21,7 +21,7 @@
  */
 
 #include "httpsource.h"
-#include "httpsource-listener.h"
+#include "http-server-listener.h"
 #include "logthrsource/logthrsourcedrv.h"
 #include "mainloop-worker.h"
 #include "messages.h"

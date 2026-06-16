@@ -14,8 +14,8 @@ endif ()
 set(HTTP_SOURCE_SOURCES
     httpsource.h
     httpsource.c
-    httpsource-listener.h
-    httpsource-listener.c
+    http-server-listener.h
+    http-server-listener.c
     httpsource-parser.c
     httpsource-parser.h
     httpsource-plugin.c

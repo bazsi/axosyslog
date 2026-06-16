@@ -4,8 +4,8 @@ module_LTLIBRARIES                  += modules/http-source/libhttp-source.la
 modules_http_source_libhttp_source_la_SOURCES = \
   modules/http-source/httpsource.h               \
   modules/http-source/httpsource.c               \
-  modules/http-source/httpsource-listener.h      \
-  modules/http-source/httpsource-listener.c      \
+  modules/http-source/http-server-listener.h      \
+  modules/http-source/http-server-listener.c      \
   modules/http-source/httpsource-grammar.y       \
   modules/http-source/httpsource-parser.c        \
   modules/http-source/httpsource-parser.h        \

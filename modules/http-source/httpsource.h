@@ -23,7 +23,6 @@
 #ifndef HTTPSOURCE_H
 #define HTTPSOURCE_H
 
-#include "syslog-ng.h"
 #include "driver.h"
 #include "logsource.h"
 #include "gsockaddr.h"
