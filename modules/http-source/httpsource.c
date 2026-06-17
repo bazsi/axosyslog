@@ -28,8 +28,6 @@
 #include "stats/stats-cluster-key-builder.h"
 #include "logmsg/logmsg.h"
 
-#include <microhttpd.h>
-
 #define DEFAULT_MAX_REQUEST_SIZE (8 * 1024 * 1024)
 
 struct HTTPSourceDriver
@@ -69,17 +67,20 @@ _resume_suspended_connections(LogThreadedSourceWorker *worker)
     return;
 
   for (GList *l = to_resume; l; l = l->next)
-    MHD_resume_connection((struct MHD_Connection *) l->data);
+    http_server_listener_resume_connection((struct MHD_Connection *) l->data);
   g_list_free(to_resume);
 
   if (self->listener)
     http_server_listener_wakeup(self->listener);
 }
 
-HTTPSourcePostStatus
-http_sd_post_body(HTTPSourceDriver *self, struct MHD_Connection *connection,
-                  const gchar *body, gsize body_len, gsize *offset, GSockAddr *peer)
+/* HTTPServerRequestHandler: runs on the listener thread */
+static HTTPServerRequestResult
+_handle_request_body(gpointer user_data, struct MHD_Connection *connection,
+                     const gchar *body, gsize body_len, gsize *offset, GSockAddr *peer)
 {
+  HTTPSourceDriver *self = (HTTPSourceDriver *) user_data;
+
   while (*offset < body_len)
     {
       const gchar *p = body + *offset;
@@ -104,10 +105,10 @@ http_sd_post_body(HTTPSourceDriver *self, struct MHD_Connection *connection,
           g_mutex_lock(&self->backpressure_lock);
           if (!log_threaded_source_worker_free_to_send(self->worker))
             {
-              MHD_suspend_connection(connection);
+              http_server_listener_suspend_connection(connection);
               self->suspended_connections = g_list_prepend(self->suspended_connections, connection);
               g_mutex_unlock(&self->backpressure_lock);
-              return HTTP_SD_POST_SUSPENDED;
+              return HTTP_SERVER_REQUEST_SUSPENDED;
             }
           g_mutex_unlock(&self->backpressure_lock);
         }
@@ -121,12 +122,15 @@ http_sd_post_body(HTTPSourceDriver *self, struct MHD_Connection *connection,
       *offset += advance;
     }
 
-  return HTTP_SD_POST_DONE;
+  return HTTP_SERVER_REQUEST_COMPLETE;
 }
 
-void
-http_sd_forget_connection(HTTPSourceDriver *self, struct MHD_Connection *connection)
+/* HTTPServerRequestCompletion: drop the connection from the suspended set */
+static void
+_request_completed(gpointer user_data, struct MHD_Connection *connection)
 {
+  HTTPSourceDriver *self = (HTTPSourceDriver *) user_data;
+
   g_mutex_lock(&self->backpressure_lock);
   self->suspended_connections = g_list_remove(self->suspended_connections, connection);
   g_mutex_unlock(&self->backpressure_lock);
@@ -142,7 +146,7 @@ _resume_and_clear_all(HTTPSourceDriver *self)
 
   gboolean had_any = (to_resume != NULL);
   for (GList *l = to_resume; l; l = l->next)
-    MHD_resume_connection((struct MHD_Connection *) l->data);
+    http_server_listener_resume_connection((struct MHD_Connection *) l->data);
   g_list_free(to_resume);
 
   if (had_any && self->listener)
@@ -228,7 +232,9 @@ _init(LogPipe *s)
   if (!self->listener)
     return FALSE;
 
-  http_server_listener_register_path(self->listener, self->path, self, self->max_request_size);
+  http_server_listener_register_path(self->listener, self->path,
+                                     _handle_request_body, _request_completed, self,
+                                     self->max_request_size);
   return TRUE;
 }
 
@@ -238,7 +244,7 @@ _deinit(LogPipe *s)
   HTTPSourceDriver *self = (HTTPSourceDriver *) s;
 
   if (self->listener)
-    http_server_listener_unregister_path(self->listener, self->path, self);
+    http_server_listener_unregister_path(self->listener, self->path, self);  /* user_data == self */
 
   /* unblock any connection still waiting on our window so it can finish */
   _resume_and_clear_all(self);

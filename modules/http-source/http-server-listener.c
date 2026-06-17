@@ -21,7 +21,6 @@
  */
 
 #include "http-server-listener.h"
-#include "httpsource.h"
 #include "mainloop-threaded-worker.h"
 #include "messages.h"
 #include "atomic.h"
@@ -48,7 +47,9 @@
 
 typedef struct _PathRegistration
 {
-  HTTPSourceDriver *source;
+  HTTPServerRequestHandler handler;
+  HTTPServerRequestCompletion completion;
+  gpointer user_data;
   gsize max_request_size;
 } PathRegistration;
 
@@ -116,16 +117,17 @@ _extract_peer_addr(struct MHD_Connection *connection)
   return g_sockaddr_new(sa, salen);
 }
 
-static HTTPSourceDriver *
-_lookup_source(HTTPServerListener *self, const gchar *path, gsize *max_request_size)
+/* copy the registration for a path into *out (so it stays valid without
+ * holding the lock); returns FALSE if no registration exists for the path */
+static gboolean
+_lookup_registration(HTTPServerListener *self, const gchar *path, PathRegistration *out)
 {
   g_mutex_lock(&self->lock);
   PathRegistration *reg = g_hash_table_lookup(self->paths, path);
-  HTTPSourceDriver *source = reg ? reg->source : NULL;
-  if (reg && max_request_size)
-    *max_request_size = reg->max_request_size;
+  if (reg)
+    *out = *reg;
   g_mutex_unlock(&self->lock);
-  return source;
+  return reg != NULL;
 }
 
 static enum MHD_Result
@@ -136,12 +138,14 @@ _handle_request(void *cls, struct MHD_Connection *connection,
   HTTPServerListener *self = (HTTPServerListener *) cls;
   RequestContext *ctx = (RequestContext *) *con_cls;
 
+  PathRegistration reg;
+
   if (!ctx)
     {
       if (strcmp(method, MHD_HTTP_METHOD_POST) != 0)
         return _send_response(connection, MHD_HTTP_METHOD_NOT_ALLOWED, RESPONSE_METHOD_NOT_ALLOWED);
 
-      if (!_lookup_source(self, url, NULL))
+      if (!_lookup_registration(self, url, &reg))
         return _send_response(connection, MHD_HTTP_NOT_FOUND, RESPONSE_NOT_FOUND);
 
       ctx = g_new0(RequestContext, 1);
@@ -153,10 +157,8 @@ _handle_request(void *cls, struct MHD_Connection *connection,
 
   if (*upload_data_size != 0)
     {
-      gsize max_request_size = 0;
-      _lookup_source(self, ctx->path, &max_request_size);
-
-      if (max_request_size && ctx->body->len + *upload_data_size > max_request_size)
+      if (_lookup_registration(self, ctx->path, &reg) &&
+          reg.max_request_size && ctx->body->len + *upload_data_size > reg.max_request_size)
         ctx->too_large = TRUE;
       else
         g_string_append_len(ctx->body, upload_data, *upload_data_size);
@@ -168,17 +170,16 @@ _handle_request(void *cls, struct MHD_Connection *connection,
   if (ctx->too_large)
     return _send_response(connection, HTTP_STATUS_TOO_LARGE, RESPONSE_TOO_LARGE);
 
-  HTTPSourceDriver *source = _lookup_source(self, ctx->path, NULL);
-  if (!source)
+  if (!_lookup_registration(self, ctx->path, &reg))
     return _send_response(connection, MHD_HTTP_NOT_FOUND, RESPONSE_NOT_FOUND);
 
   if (!ctx->peer)
     ctx->peer = _extract_peer_addr(connection);
 
-  HTTPSourcePostStatus status =
-    http_sd_post_body(source, connection, ctx->body->str, ctx->body->len, &ctx->offset, ctx->peer);
+  HTTPServerRequestResult result =
+    reg.handler(reg.user_data, connection, ctx->body->str, ctx->body->len, &ctx->offset, ctx->peer);
 
-  if (status == HTTP_SD_POST_SUSPENDED)
+  if (result == HTTP_SERVER_REQUEST_SUSPENDED)
     return MHD_YES;
 
   return _send_response(connection, MHD_HTTP_OK, RESPONSE_OK);
@@ -193,9 +194,9 @@ _request_completed(void *cls, struct MHD_Connection *connection,
   if (!ctx)
     return;
 
-  HTTPSourceDriver *source = ctx->path ? _lookup_source(self, ctx->path, NULL) : NULL;
-  if (source)
-    http_sd_forget_connection(source, connection);
+  PathRegistration reg;
+  if (ctx->path && _lookup_registration(self, ctx->path, &reg))
+    reg.completion(reg.user_data, connection);
 
   g_string_free(ctx->body, TRUE);
   g_free(ctx->path);
@@ -293,17 +294,21 @@ http_server_listener_start(HTTPServerListener *self)
 
 gboolean
 http_server_listener_register_path(HTTPServerListener *self, const gchar *path,
-                                   HTTPSourceDriver *source, gsize max_request_size)
+                                   HTTPServerRequestHandler handler,
+                                   HTTPServerRequestCompletion completion,
+                                   gpointer user_data, gsize max_request_size)
 {
   g_mutex_lock(&self->lock);
 
   if (g_hash_table_contains(self->paths, path))
-    msg_warning("http(): a source is already registered for this path on the given address, "
+    msg_warning("http(): a handler is already registered for this path on the given address, "
                 "the previous registration will be replaced",
                 evt_tag_str("path", path), evt_tag_int("port", self->port));
 
   PathRegistration *reg = g_new0(PathRegistration, 1);
-  reg->source = source;
+  reg->handler = handler;
+  reg->completion = completion;
+  reg->user_data = user_data;
   reg->max_request_size = max_request_size;
   g_hash_table_insert(self->paths, g_strdup(path), reg);
 
@@ -313,17 +318,29 @@ http_server_listener_register_path(HTTPServerListener *self, const gchar *path,
 
 void
 http_server_listener_unregister_path(HTTPServerListener *self, const gchar *path,
-                                      HTTPSourceDriver *source)
+                                      gpointer user_data)
 {
   g_mutex_lock(&self->lock);
 
   PathRegistration *reg = g_hash_table_lookup(self->paths, path);
-  /* only remove the entry if it still points to our source; during a reload
-   * a freshly initialized source may have already taken over this path */
-  if (reg && reg->source == source)
+  /* only remove the entry if it still belongs to us; during a reload a freshly
+   * initialized registration may have already taken over this path */
+  if (reg && reg->user_data == user_data)
     g_hash_table_remove(self->paths, path);
 
   g_mutex_unlock(&self->lock);
+}
+
+void
+http_server_listener_suspend_connection(struct MHD_Connection *connection)
+{
+  MHD_suspend_connection(connection);
+}
+
+void
+http_server_listener_resume_connection(struct MHD_Connection *connection)
+{
+  MHD_resume_connection(connection);
 }
 
 static gboolean
