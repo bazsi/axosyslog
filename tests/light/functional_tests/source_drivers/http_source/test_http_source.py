@@ -1,0 +1,104 @@
+#!/usr/bin/env python
+#############################################################################
+# Copyright (c) 2026 Axoflow
+#
+# This program is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# As an additional exemption you are allowed to compile & link against the
+# OpenSSL libraries as published by the OpenSSL project. See the file
+# COPYING for details.
+#
+#############################################################################
+LOOPBACK = "127.0.0.1"
+
+
+def test_http_source_splits_body_into_messages(config, syslog_ng, port_allocator):
+    http_source = config.create_http_source(port=port_allocator(), path="/api/ingest", localip=LOOPBACK)
+    file_destination = config.create_file_destination(file_name="output.log", template=r'"${MESSAGE}\n"')
+    config.create_logpath(statements=[http_source, file_destination])
+
+    syslog_ng.start(config)
+
+    http_source.write_logs(["first message", "second message", "third message"])
+
+    assert file_destination.read_logs(3) == ["first message", "second message", "third message"]
+
+
+def test_http_source_captures_client_address(config, syslog_ng, port_allocator):
+    http_source = config.create_http_source(port=port_allocator(), path="/in", localip=LOOPBACK)
+    file_destination = config.create_file_destination(file_name="output.log", template=r'"${SOURCEIP}\n"')
+    config.create_logpath(statements=[http_source, file_destination])
+
+    syslog_ng.start(config)
+
+    http_source.write_log("hello")
+
+    assert file_destination.read_log() == LOOPBACK
+
+
+def test_http_source_rejects_non_post_method(config, syslog_ng, port_allocator):
+    http_source = config.create_http_source(port=port_allocator(), path="/in", localip=LOOPBACK)
+    file_destination = config.create_file_destination(file_name="output.log", template=r'"${MESSAGE}\n"')
+    config.create_logpath(statements=[http_source, file_destination])
+
+    syslog_ng.start(config)
+
+    assert http_source.get().status_code == 405
+
+
+def test_http_source_rejects_unknown_path(config, syslog_ng, port_allocator):
+    http_source = config.create_http_source(port=port_allocator(), path="/in", localip=LOOPBACK)
+    file_destination = config.create_file_destination(file_name="output.log", template=r'"${MESSAGE}\n"')
+    config.create_logpath(statements=[http_source, file_destination])
+
+    syslog_ng.start(config)
+
+    assert http_source.post("some data", path="/unknown").status_code == 404
+
+
+def test_http_source_shares_a_port_between_paths(config, syslog_ng, port_allocator):
+    shared_port = port_allocator()
+
+    alpha = config.create_http_source(port=shared_port, path="/alpha", localip=LOOPBACK)
+    beta = config.create_http_source(port=shared_port, path="/beta", localip=LOOPBACK)
+
+    alpha_destination = config.create_file_destination(file_name="alpha.log", template=r'"${MESSAGE}\n"')
+    beta_destination = config.create_file_destination(file_name="beta.log", template=r'"${MESSAGE}\n"')
+
+    config.create_logpath(statements=[alpha, alpha_destination])
+    config.create_logpath(statements=[beta, beta_destination])
+
+    syslog_ng.start(config)
+
+    alpha.write_log("apple")
+    beta.write_log("banana")
+
+    assert alpha_destination.read_log() == "apple"
+    assert beta_destination.read_log() == "banana"
+
+
+def test_http_source_works_across_reload(config, syslog_ng, port_allocator):
+    http_source = config.create_http_source(port=port_allocator(), path="/in", localip=LOOPBACK)
+    file_destination = config.create_file_destination(file_name="output.log", template=r'"${MESSAGE}\n"')
+    config.create_logpath(statements=[http_source, file_destination])
+
+    syslog_ng.start(config)
+
+    http_source.write_log("before reload")
+    assert file_destination.read_log() == "before reload"
+
+    syslog_ng.reload(config)
+
+    http_source.write_log("after reload")
+    assert file_destination.read_log() == "after reload"
