@@ -16,6 +16,8 @@ set(HTTP_SOURCE_SOURCES
     httpsource.c
     http-server-listener.h
     http-server-listener.c
+    http-source-config.h
+    http-source-config.c
     httpsource-parser.c
     httpsource-parser.h
     httpsource-plugin.c

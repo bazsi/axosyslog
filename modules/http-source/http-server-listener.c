@@ -21,6 +21,7 @@
  */
 
 #include "http-server-listener.h"
+#include "http-source-config.h"
 #include "mainloop-threaded-worker.h"
 #include "messages.h"
 #include "atomic.h"
@@ -60,6 +61,8 @@ struct HTTPServerListener
   gint port;
   gint user_count;
 
+  GHashTable *registry;         /* the per-config registry this listener lives in */
+
   struct MHD_Daemon *daemon;
   struct sockaddr_storage bind_sa;
   gboolean has_bind_sa;
@@ -72,9 +75,6 @@ struct HTTPServerListener
   GAtomicCounter stop_requested;
   gint wakeup_pipe[2];
 };
-
-static GMutex registry_lock;
-static GHashTable *registry;    /* key (owned gchar *) -> HTTPServerListener * */
 
 typedef struct _RequestContext
 {
@@ -505,34 +505,51 @@ _listener_free(HTTPServerListener *self)
   g_free(self);
 }
 
+/* GDestroyNotify for the registry: stop and free in one step, so removing a
+ * listener (on release) or unref'ing the registry (on config free) both fully
+ * tear it down */
+static void
+_listener_destroy(gpointer p)
+{
+  HTTPServerListener *self = (HTTPServerListener *) p;
+  _listener_stop(self);
+  _listener_free(self);
+}
+
+/* The registry lives in the per-configuration HTTPSourceConfig, so it is
+ * only ever accessed from the main thread (driver init/deinit) and needs no
+ * locking of its own. */
+static GHashTable *
+_get_registry(GlobalConfig *cfg)
+{
+  HTTPSourceConfig *hsc = http_source_config_get(cfg);
+  if (!hsc->listeners)
+    hsc->listeners = g_hash_table_new_full(g_str_hash, g_str_equal, NULL, _listener_destroy);
+  return hsc->listeners;
+}
+
 HTTPServerListener *
 http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint port)
 {
-  gchar *key = g_strdup_printf("%p/%s:%d", (void *) cfg, bind_addr ? bind_addr : "", port);
-
-  g_mutex_lock(&registry_lock);
-  if (!registry)
-    registry = g_hash_table_new_full(g_str_hash, g_str_equal, NULL, (GDestroyNotify) _listener_free);
+  GHashTable *registry = _get_registry(cfg);
+  gchar *key = g_strdup_printf("%s:%d", bind_addr ? bind_addr : "", port);
 
   HTTPServerListener *listener = g_hash_table_lookup(registry, key);
   if (listener)
-    listener->user_count++;
-  g_mutex_unlock(&registry_lock);
-
-  if (!listener)
     {
-      listener = _listener_new(key, bind_addr, port);
-      if (_listener_start(listener))
-        {
-          g_mutex_lock(&registry_lock);
-          g_hash_table_insert(registry, listener->key, listener);
-          g_mutex_unlock(&registry_lock);
-        }
-      else
-        {
-          _listener_free(listener);
-          listener = NULL;
-        }
+      listener->user_count++;
+      g_free(key);
+      return listener;
+    }
+
+  listener = _listener_new(key, bind_addr, port);
+  listener->registry = registry;
+  if (_listener_start(listener))
+    g_hash_table_insert(registry, listener->key, listener);
+  else
+    {
+      _listener_free(listener);
+      listener = NULL;
     }
 
   g_free(key);
@@ -542,14 +559,8 @@ http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint por
 void
 http_server_listener_release(HTTPServerListener *listener)
 {
-  g_mutex_lock(&registry_lock);
-  if (listener->user_count == 1)
-    {
-      /* last reference should destruct and free the listener */
-      _listener_stop(listener);
-      g_hash_table_remove(registry, listener->key);
-    }
-  else
-    listener->user_count--;
-  g_mutex_unlock(&registry_lock);
+  /* the last reference removes the listener from the registry, which destroys
+   * it (stop + free) via the hash table's value-destroy function */
+  if (--listener->user_count == 0)
+    g_hash_table_remove(listener->registry, listener->key);
 }

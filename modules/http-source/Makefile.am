@@ -6,6 +6,8 @@ modules_http_source_libhttp_source_la_SOURCES = \
   modules/http-source/httpsource.c               \
   modules/http-source/http-server-listener.h      \
   modules/http-source/http-server-listener.c      \
+  modules/http-source/http-source-config.h        \
+  modules/http-source/http-source-config.c        \
   modules/http-source/httpsource-grammar.y       \
   modules/http-source/httpsource-parser.c        \
   modules/http-source/httpsource-parser.h        \
