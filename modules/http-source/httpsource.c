@@ -22,42 +22,49 @@
 
 #include "httpsource.h"
 #include "http-server-listener.h"
-#include "logthrsource/logthrsourcedrv.h"
+#include "logsource.h"
 #include "mainloop-worker.h"
 #include "messages.h"
 #include "stats/stats-cluster-key-builder.h"
 #include "logmsg/logmsg.h"
+#include "cfg.h"
 
 #define DEFAULT_MAX_REQUEST_SIZE (8 * 1024 * 1024)
 
+/*
+ * A minimal LogSource: the listener thread (a registered mainloop worker
+ * thread) posts messages into it directly via log_source_post().  We only
+ * override wakeup(), which the flow-control/ack path calls when the window
+ * reopens, to resume the connections suspended on this source.
+ */
+typedef struct _HTTPSource
+{
+  LogSource super;
+  HTTPSourceDriver *owner;
+} HTTPSource;
+
 struct HTTPSourceDriver
 {
-  LogThreadedSourceDriver super;
+  LogSrcDriver super;
 
   gint port;
   gchar *bind_addr;
   gchar *path;
   gsize max_request_size;
 
+  LogSourceOptions source_options;
   HTTPServerListener *listener;
-  LogThreadedSourceWorker *worker;
+  HTTPSource *source;
 
   /* connections suspended because this source's flow-control window is full;
-   * accessed from the listener thread (suspend) and the ack path (resume) */
+   * touched by the listener thread (suspend) and the ack path (resume) */
   GMutex backpressure_lock;
   GList *suspended_connections;
 };
 
-/*
- * Called from the flow-control/ack path (LogSource wakeup) when the window
- * reopens.  Resume every connection that was suspended waiting on this source
- * and nudge the listener loop so it processes them.
- */
 static void
-_resume_suspended_connections(LogThreadedSourceWorker *worker)
+_resume_all_connections(HTTPSourceDriver *self)
 {
-  HTTPSourceDriver *self = (HTTPSourceDriver *) worker->control;
-
   g_mutex_lock(&self->backpressure_lock);
   GList *to_resume = self->suspended_connections;
   self->suspended_connections = NULL;
@@ -74,12 +81,24 @@ _resume_suspended_connections(LogThreadedSourceWorker *worker)
     http_server_listener_wakeup(self->listener);
 }
 
-/* HTTPServerRequestHandler: runs on the listener thread */
+/* LogSource wakeup: the window reopened, resume the suspended connections */
+static void
+_source_wakeup(LogSource *s)
+{
+  HTTPSource *self = (HTTPSource *) s;
+  _resume_all_connections(self->owner);
+}
+
+/*
+ * HTTPServerRequestHandler: runs on the listener thread.  Posts the body line
+ * by line; on a full window the connection is suspended and resumed later.
+ */
 static HTTPServerRequestResult
 _handle_request_body(gpointer user_data, struct MHD_Connection *connection,
                      const gchar *body, gsize body_len, gsize *offset, GSockAddr *peer)
 {
   HTTPSourceDriver *self = (HTTPSourceDriver *) user_data;
+  LogSource *source = &self->source->super;
 
   while (*offset < body_len)
     {
@@ -99,15 +118,19 @@ _handle_request_body(gpointer user_data, struct MHD_Connection *connection,
         }
 
       /* fast path check, then re-check under the lock to close the race with
-       * a concurrent window reopen (_resume_suspended_connections) */
-      if (!log_threaded_source_worker_free_to_send(self->worker))
+       * a concurrent window reopen (_source_wakeup) */
+      if (!log_source_free_to_send(source))
         {
           g_mutex_lock(&self->backpressure_lock);
-          if (!log_threaded_source_worker_free_to_send(self->worker))
+          if (!log_source_free_to_send(source))
             {
               http_server_listener_suspend_connection(connection);
               self->suspended_connections = g_list_prepend(self->suspended_connections, connection);
               g_mutex_unlock(&self->backpressure_lock);
+
+              /* flush what we have already posted so the destination can drain
+               * it and reopen the window (otherwise the resume never comes) */
+              main_loop_worker_invoke_batch_callbacks();
               return HTTP_SERVER_REQUEST_SUSPENDED;
             }
           g_mutex_unlock(&self->backpressure_lock);
@@ -115,13 +138,15 @@ _handle_request_body(gpointer user_data, struct MHD_Connection *connection,
 
       LogMessage *msg = log_msg_new_empty();
       log_msg_set_value(msg, LM_V_MESSAGE, p, line_len);
+      log_msg_set_value(msg, LM_V_TRANSPORT, "http", 4);
       if (peer)
         log_msg_set_saddr_ref(msg, g_sockaddr_ref(peer));
-      log_threaded_source_worker_post(self->worker, msg);
+      log_source_post(source, msg);
 
       *offset += advance;
     }
 
+  main_loop_worker_invoke_batch_callbacks();
   return HTTP_SERVER_REQUEST_COMPLETE;
 }
 
@@ -136,44 +161,19 @@ _request_completed(gpointer user_data, struct MHD_Connection *connection)
   g_mutex_unlock(&self->backpressure_lock);
 }
 
-static void
-_resume_and_clear_all(HTTPSourceDriver *self)
+static HTTPSource *
+_http_source_new(GlobalConfig *cfg, HTTPSourceDriver *owner)
 {
-  g_mutex_lock(&self->backpressure_lock);
-  GList *to_resume = self->suspended_connections;
-  self->suspended_connections = NULL;
-  g_mutex_unlock(&self->backpressure_lock);
-
-  gboolean had_any = (to_resume != NULL);
-  for (GList *l = to_resume; l; l = l->next)
-    http_server_listener_resume_connection((struct MHD_Connection *) l->data);
-  g_list_free(to_resume);
-
-  if (had_any && self->listener)
-    http_server_listener_wakeup(self->listener);
-}
-
-static LogThreadedSourceWorker *
-_construct_worker(LogThreadedSourceDriver *s, gint worker_index)
-{
-  HTTPSourceDriver *self = (HTTPSourceDriver *) s;
-
-  LogThreadedSourceWorker *worker = g_new0(LogThreadedSourceWorker, 1);
-  log_threaded_source_worker_init_instance(worker, s, worker_index);
-
-  /* the worker thread is never started: the shared listener thread is the
-   * producer.  We only need the worker as a LogSource and its wakeup hook. */
-  worker->wakeup = _resume_suspended_connections;
-
-  self->worker = worker;
-  return worker;
+  HTTPSource *self = g_new0(HTTPSource, 1);
+  log_source_init_instance(&self->super, cfg);
+  self->super.wakeup = _source_wakeup;
+  self->owner = owner;
+  return self;
 }
 
 static void
-_format_stats_key(LogThreadedSourceDriver *s, StatsClusterKeyBuilder *kb)
+_format_stats_kb(HTTPSourceDriver *self, StatsClusterKeyBuilder *kb)
 {
-  HTTPSourceDriver *self = (HTTPSourceDriver *) s;
-
   stats_cluster_key_builder_add_legacy_label(kb, stats_cluster_label("driver", "http"));
 
   gchar buf[64];
@@ -187,10 +187,8 @@ _format_stats_key(LogThreadedSourceDriver *s, StatsClusterKeyBuilder *kb)
 static gboolean
 _pre_config_init(LogPipe *s)
 {
-  /* The per-source worker threads are never started (the shared listener
-   * thread is the producer), so we only reserve a slot for the listener
-   * thread itself.  Over-allocating when several sources share a listener is
-   * harmless. */
+  /* reserve a thread slot for the (shared) listener thread; over-allocating
+   * when several sources share a listener is harmless */
   main_loop_worker_allocate_thread_space(1);
   return TRUE;
 }
@@ -225,7 +223,20 @@ _init(LogPipe *s)
       return FALSE;
     }
 
-  if (!log_threaded_source_driver_init_method(s))
+  if (!log_src_driver_init_method(s))
+    return FALSE;
+
+  log_source_options_init(&self->source_options, cfg, self->super.super.group);
+
+  self->source = _http_source_new(cfg, self);
+
+  StatsClusterKeyBuilder *kb = stats_cluster_key_builder_new();
+  _format_stats_kb(self, kb);
+  log_source_set_options(&self->source->super, &self->source_options, self->super.super.id, kb, TRUE,
+                         self->super.super.super.expr_node);
+
+  log_pipe_append(&self->source->super.super, &self->super.super.super);
+  if (!log_pipe_init(&self->source->super.super))
     return FALSE;
 
   self->listener = http_server_listener_acquire(cfg, self->bind_addr, self->port);
@@ -245,12 +256,17 @@ _deinit(LogPipe *s)
   GlobalConfig *cfg = log_pipe_get_config(s);
 
   if (self->listener)
-    http_server_listener_unregister_path(self->listener, self->path, self);  /* user_data == self */
+    http_server_listener_unregister_path(self->listener, self->path, self);
 
   /* unblock any connection still waiting on our window so it can finish */
-  _resume_and_clear_all(self);
+  _resume_all_connections(self);
 
-  gboolean result = log_threaded_source_driver_deinit_method(s);
+  if (self->source)
+    {
+      log_pipe_deinit(&self->source->super.super);
+      log_pipe_unref(&self->source->super.super);
+      self->source = NULL;
+    }
 
   if (self->listener)
     {
@@ -258,7 +274,7 @@ _deinit(LogPipe *s)
       self->listener = NULL;
     }
 
-  return result;
+  return log_src_driver_deinit_method(s);
 }
 
 static void
@@ -266,12 +282,26 @@ _free(LogPipe *s)
 {
   HTTPSourceDriver *self = (HTTPSourceDriver *) s;
 
+  if (self->source)
+    {
+      log_pipe_unref(&self->source->super.super);
+      self->source = NULL;
+    }
+
   g_free(self->bind_addr);
   g_free(self->path);
   g_list_free(self->suspended_connections);
   g_mutex_clear(&self->backpressure_lock);
+  log_source_options_destroy(&self->source_options);
 
-  log_threaded_source_driver_free_method(s);
+  log_src_driver_free(s);
+}
+
+LogSourceOptions *
+http_sd_get_source_options(LogDriver *s)
+{
+  HTTPSourceDriver *self = (HTTPSourceDriver *) s;
+  return &self->source_options;
 }
 
 void
@@ -308,21 +338,18 @@ LogDriver *
 http_sd_new(GlobalConfig *cfg)
 {
   HTTPSourceDriver *self = g_new0(HTTPSourceDriver, 1);
-  log_threaded_source_driver_init_instance(&self->super, cfg);
+  log_src_driver_init_instance(&self->super, cfg);
 
   self->bind_addr = g_strdup("0.0.0.0");
   self->max_request_size = DEFAULT_MAX_REQUEST_SIZE;
   g_mutex_init(&self->backpressure_lock);
+  log_source_options_defaults(&self->source_options);
 
-  self->super.super.super.super.init = _init;
-  self->super.super.super.super.deinit = _deinit;
-  self->super.super.super.super.free_fn = _free;
-  self->super.super.super.super.pre_config_init = _pre_config_init;
-  self->super.super.super.super.post_config_init = _post_config_init;
-  self->super.format_stats_key = _format_stats_key;
-  self->super.worker_construct = _construct_worker;
+  self->super.super.super.init = _init;
+  self->super.super.super.deinit = _deinit;
+  self->super.super.super.free_fn = _free;
+  self->super.super.super.pre_config_init = _pre_config_init;
+  self->super.super.super.post_config_init = _post_config_init;
 
-  log_threaded_source_driver_set_transport_name(&self->super, "http");
-
-  return &self->super.super.super;
+  return &self->super.super;
 }

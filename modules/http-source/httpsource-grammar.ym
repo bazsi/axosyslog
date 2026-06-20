@@ -28,7 +28,6 @@
 %code {
 
 #include "httpsource.h"
-#include "logthrsource/logthrsourcedrv.h"
 #include "cfg-parser.h"
 #include "syslog-names.h"
 #include "messages.h"
@@ -97,7 +96,8 @@ source_http_option
     {
       http_sd_set_max_request_size(last_driver, $3);
     }
-  | threaded_source_driver_option
+  | { last_source_options = http_sd_get_source_options(last_driver); } source_option
+  | source_driver_option
   ;
 
 /* INCLUDE_RULES */
