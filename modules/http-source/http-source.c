@@ -62,24 +62,7 @@ struct HTTPSourceDriver
   GList *suspended_connections;
 };
 
-static void
-_resume_all_connections(HTTPSourceDriver *self)
-{
-  g_mutex_lock(&self->backpressure_lock);
-  GList *to_resume = self->suspended_connections;
-  self->suspended_connections = NULL;
-  g_mutex_unlock(&self->backpressure_lock);
-
-  if (!to_resume)
-    return;
-
-  for (GList *l = to_resume; l; l = l->next)
-    http_server_listener_resume_connection((struct MHD_Connection *) l->data);
-  g_list_free(to_resume);
-
-  if (self->listener)
-    http_server_listener_wakeup(self->listener);
-}
+static void _resume_all_connections(HTTPSourceDriver *self);
 
 /* LogSource wakeup: the window reopened, resume the suspended connections */
 static void
@@ -97,8 +80,7 @@ static HTTPServerRequestResult
 _handle_request_body(gpointer user_data, struct MHD_Connection *connection,
                      const gchar *body, gsize body_len, gsize *offset, GSockAddr *peer)
 {
-  HTTPSourceDriver *self = (HTTPSourceDriver *) user_data;
-  LogSource *source = &self->source->super;
+  HTTPSource *self = (HTTPSource *) user_data;
 
   while (*offset < body_len)
     {
@@ -119,21 +101,21 @@ _handle_request_body(gpointer user_data, struct MHD_Connection *connection,
 
       /* fast path check, then re-check under the lock to close the race with
        * a concurrent window reopen (_source_wakeup) */
-      if (!log_source_free_to_send(source))
+      if (!log_source_free_to_send(&self->super))
         {
-          g_mutex_lock(&self->backpressure_lock);
-          if (!log_source_free_to_send(source))
+          g_mutex_lock(&self->owner->backpressure_lock);
+          if (!log_source_free_to_send(&self->super))
             {
               http_server_listener_suspend_connection(connection);
-              self->suspended_connections = g_list_prepend(self->suspended_connections, connection);
-              g_mutex_unlock(&self->backpressure_lock);
+              self->owner->suspended_connections = g_list_prepend(self->owner->suspended_connections, connection);
+              g_mutex_unlock(&self->owner->backpressure_lock);
 
               /* flush what we have already posted so the destination can drain
                * it and reopen the window (otherwise the resume never comes) */
               main_loop_worker_invoke_batch_callbacks();
               return HTTP_SERVER_REQUEST_SUSPENDED;
             }
-          g_mutex_unlock(&self->backpressure_lock);
+          g_mutex_unlock(&self->owner->backpressure_lock);
         }
 
       LogMessage *msg = log_msg_new_empty();
@@ -141,7 +123,7 @@ _handle_request_body(gpointer user_data, struct MHD_Connection *connection,
       log_msg_set_value(msg, LM_V_TRANSPORT, "http", 4);
       if (peer)
         log_msg_set_saddr_ref(msg, g_sockaddr_ref(peer));
-      log_source_post(source, msg);
+      log_source_post(&self->super, msg);
 
       *offset += advance;
     }
@@ -154,11 +136,11 @@ _handle_request_body(gpointer user_data, struct MHD_Connection *connection,
 static void
 _request_completed(gpointer user_data, struct MHD_Connection *connection)
 {
-  HTTPSourceDriver *self = (HTTPSourceDriver *) user_data;
+  HTTPSource *self = (HTTPSource *) user_data;
 
-  g_mutex_lock(&self->backpressure_lock);
-  self->suspended_connections = g_list_remove(self->suspended_connections, connection);
-  g_mutex_unlock(&self->backpressure_lock);
+  g_mutex_lock(&self->owner->backpressure_lock);
+  self->owner->suspended_connections = g_list_remove(self->owner->suspended_connections, connection);
+  g_mutex_unlock(&self->owner->backpressure_lock);
 }
 
 static HTTPSource *
@@ -170,6 +152,28 @@ _http_source_new(GlobalConfig *cfg, HTTPSourceDriver *owner)
   self->owner = owner;
   return self;
 }
+
+
+static void
+_resume_all_connections(HTTPSourceDriver *self)
+{
+  g_mutex_lock(&self->backpressure_lock);
+  GList *to_resume = self->suspended_connections;
+  self->suspended_connections = NULL;
+  g_mutex_unlock(&self->backpressure_lock);
+
+  if (!to_resume)
+    return;
+
+  for (GList *l = to_resume; l; l = l->next)
+    http_server_listener_resume_connection((struct MHD_Connection *) l->data);
+  g_list_free(to_resume);
+
+  if (self->listener)
+    http_server_listener_wakeup(self->listener);
+}
+
+
 
 static void
 _format_stats_kb(HTTPSourceDriver *self, StatsClusterKeyBuilder *kb)
@@ -244,7 +248,7 @@ _init(LogPipe *s)
     return FALSE;
 
   http_server_listener_register_path(self->listener, self->path,
-                                     _handle_request_body, _request_completed, self,
+                                     _handle_request_body, _request_completed, self->source,
                                      self->max_request_size);
   return TRUE;
 }
@@ -256,7 +260,7 @@ _deinit(LogPipe *s)
   GlobalConfig *cfg = log_pipe_get_config(s);
 
   if (self->listener)
-    http_server_listener_unregister_path(self->listener, self->path, self);
+    http_server_listener_unregister_path(self->listener, self->path, self->source);
 
   /* unblock any connection still waiting on our window so it can finish */
   _resume_all_connections(self);
