@@ -524,14 +524,15 @@ _get_registry(GlobalConfig *cfg)
 HTTPServerListener *
 http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint port)
 {
+  gchar key[128];
   GHashTable *registry = _get_registry(cfg);
-  gchar *key = g_strdup_printf("%s:%d", bind_addr ? bind_addr : "", port);
+
+  g_snprintf(key, sizeof(key), "%s:%d", bind_addr ? bind_addr : "", port);
 
   HTTPServerListener *listener = g_hash_table_lookup(registry, key);
   if (listener)
     {
       listener->user_count++;
-      g_free(key);
       return listener;
     }
 
@@ -544,7 +545,6 @@ http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint por
       listener = NULL;
     }
 
-  g_free(key);
   return listener;
 }
 
