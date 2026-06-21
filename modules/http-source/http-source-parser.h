@@ -27,8 +27,8 @@
 #include "cfg-lexer.h"
 #include "driver.h"
 
-extern CfgParser httpsource_parser;
+extern CfgParser http_source_parser;
 
-CFG_PARSER_DECLARE_LEXER_BINDING(httpsource_, HTTPSOURCE_, LogDriver **)
+CFG_PARSER_DECLARE_LEXER_BINDING(http_source_, HTTPSOURCE_, LogDriver **)
 
 #endif

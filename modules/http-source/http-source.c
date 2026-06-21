@@ -20,7 +20,7 @@
  *
  */
 
-#include "httpsource.h"
+#include "http-source.h"
 #include "http-server-listener.h"
 #include "logsource.h"
 #include "mainloop-worker.h"

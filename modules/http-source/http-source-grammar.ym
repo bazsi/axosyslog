@@ -21,13 +21,13 @@
  */
 
 %code top {
-#include "httpsource-parser.h"
+#include "http-source-parser.h"
 
 }
 
 %code {
 
-#include "httpsource.h"
+#include "http-source.h"
 #include "cfg-parser.h"
 #include "syslog-names.h"
 #include "messages.h"
@@ -39,7 +39,7 @@
 
 }
 
-%define api.prefix {httpsource_}
+%define api.prefix {http_source_}
 
 /* this parameter is needed in order to instruct bison to use a complete
  * argument list for yylex/yyerror */

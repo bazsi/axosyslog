@@ -12,20 +12,20 @@ if (NOT LibMHD_FOUND)
 endif ()
 
 set(HTTP_SOURCE_SOURCES
-    httpsource.h
-    httpsource.c
+    http-source.h
+    http-source.c
     http-server-listener.h
     http-server-listener.c
     http-source-config.h
     http-source-config.c
-    httpsource-parser.c
-    httpsource-parser.h
-    httpsource-plugin.c
+    http-source-parser.c
+    http-source-parser.h
+    http-source-plugin.c
 )
 
 add_module(
   TARGET http-source
-  GRAMMAR httpsource-grammar
+  GRAMMAR http-source-grammar
   INCLUDES ${LibMHD_INCLUDE_DIR}
   DEPENDS ${LibMHD_LIBRARIES}
   SOURCES ${HTTP_SOURCE_SOURCES}

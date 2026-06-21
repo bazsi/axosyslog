@@ -22,13 +22,13 @@
 
 #include "driver.h"
 #include "cfg-parser.h"
-#include "httpsource-grammar.h"
+#include "http-source-grammar.h"
 
-extern int httpsource_debug;
+extern int http_source_debug;
 
-int httpsource_parse(CfgLexer *lexer, LogDriver **instance, gpointer arg);
+int http_source_parse(CfgLexer *lexer, LogDriver **instance, gpointer arg);
 
-static CfgLexerKeyword httpsource_keywords[] =
+static CfgLexerKeyword http_source_keywords[] =
 {
   { "http",               KW_HTTP },
   { "port",               KW_PORT },
@@ -39,15 +39,15 @@ static CfgLexerKeyword httpsource_keywords[] =
   { NULL }
 };
 
-CfgParser httpsource_parser =
+CfgParser http_source_parser =
 {
 #if SYSLOG_NG_ENABLE_DEBUG
-  .debug_flag = &httpsource_debug,
+  .debug_flag = &http_source_debug,
 #endif
   .name = "http",
-  .keywords = httpsource_keywords,
-  .parse = (gint (*)(CfgLexer *, gpointer *, gpointer)) httpsource_parse,
+  .keywords = http_source_keywords,
+  .parse = (gint (*)(CfgLexer *, gpointer *, gpointer)) http_source_parse,
   .cleanup = (void (*)(gpointer)) log_pipe_unref,
 };
 
-CFG_PARSER_IMPLEMENT_LEXER_BINDING(httpsource_, HTTPSOURCE_, LogDriver **)
+CFG_PARSER_IMPLEMENT_LEXER_BINDING(http_source_, HTTPSOURCE_, LogDriver **)

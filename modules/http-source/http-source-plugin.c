@@ -20,7 +20,7 @@
  *
  */
 
-#include "httpsource-parser.h"
+#include "http-source-parser.h"
 #include "plugin.h"
 #include "plugin-types.h"
 
@@ -29,7 +29,7 @@ static Plugin http_source_plugins[] =
   {
     .type = LL_CONTEXT_SOURCE,
     .name = "http",
-    .parser = &httpsource_parser,
+    .parser = &http_source_parser,
   },
 };
 
