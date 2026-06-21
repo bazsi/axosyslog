@@ -43,6 +43,7 @@ set(SCL_DIRS
     snmptrap
     solaris
     splunk
+    splunk-hec
     sudo
     sumologic
     syslogconf

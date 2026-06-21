@@ -43,6 +43,7 @@ SCL_SUBDIRS	= \
 	snmptrap	\
 	solaris	\
 	splunk \
+	splunk-hec \
 	sudo		\
 	sumologic	\
 	syslogconf	\
