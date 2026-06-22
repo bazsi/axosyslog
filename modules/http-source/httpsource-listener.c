@@ -57,7 +57,7 @@ struct HTTPServerListener
   gchar *key;
   gchar *bind_addr;
   gint port;
-  gint ref_count;
+  gint user_count;
 
   struct MHD_Daemon *daemon;
   struct sockaddr_storage bind_sa;
@@ -461,7 +461,7 @@ _listener_new(const gchar *key, const gchar *bind_addr, gint port)
 {
   HTTPServerListener *self = g_new0(HTTPServerListener, 1);
 
-  self->ref_count = 1;
+  self->user_count = 1;
   self->key = g_strdup(key);
   self->bind_addr = g_strdup(bind_addr ? bind_addr : "");
   self->port = port;
@@ -499,7 +499,7 @@ http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint por
 
   HTTPServerListener *listener = g_hash_table_lookup(registry, key);
   if (listener)
-    listener->ref_count++;
+    listener->user_count++;
   g_mutex_unlock(&registry_lock);
 
   if (!listener)
@@ -526,13 +526,13 @@ void
 http_server_listener_release(HTTPServerListener *listener)
 {
   g_mutex_lock(&registry_lock);
-  if (listener->ref_count == 1)
+  if (listener->user_count == 1)
     {
       /* last reference should destruct and free the listener */
       _listener_stop(listener);
       g_hash_table_remove(registry, listener->key);
     }
   else
-    listener->ref_count--;
+    listener->user_count--;
   g_mutex_unlock(&registry_lock);
 }
