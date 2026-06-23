@@ -242,6 +242,7 @@ static gboolean
 _deinit(LogPipe *s)
 {
   HTTPSourceDriver *self = (HTTPSourceDriver *) s;
+  GlobalConfig *cfg = log_pipe_get_config(s);
 
   if (self->listener)
     http_server_listener_unregister_path(self->listener, self->path, self);  /* user_data == self */
@@ -253,7 +254,7 @@ _deinit(LogPipe *s)
 
   if (self->listener)
     {
-      http_server_listener_release(self->listener);
+      http_server_listener_release(cfg, self->listener);
       self->listener = NULL;
     }
 

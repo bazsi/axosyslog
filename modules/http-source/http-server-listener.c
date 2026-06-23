@@ -61,8 +61,6 @@ struct HTTPServerListener
   gint port;
   gint user_count;
 
-  GHashTable *registry;         /* the per-config registry this listener lives in */
-
   struct MHD_Daemon *daemon;
   struct sockaddr_storage bind_sa;
   gboolean has_bind_sa;
@@ -505,26 +503,21 @@ _listener_free(HTTPServerListener *self)
   g_free(self);
 }
 
-/* GDestroyNotify for the registry: stop and free in one step, so removing a
- * listener (on release) or unref'ing the registry (on config free) both fully
- * tear it down */
+/* GDestroyNotify for the registry */
 static void
-_listener_destroy(gpointer p)
+_registry_destroy_listener(gpointer p)
 {
   HTTPServerListener *self = (HTTPServerListener *) p;
   _listener_stop(self);
   _listener_free(self);
 }
 
-/* The registry lives in the per-configuration HTTPSourceConfig, so it is
- * only ever accessed from the main thread (driver init/deinit) and needs no
- * locking of its own. */
 static GHashTable *
 _get_registry(GlobalConfig *cfg)
 {
   HTTPSourceConfig *hsc = http_source_config_get(cfg);
   if (!hsc->listeners)
-    hsc->listeners = g_hash_table_new_full(g_str_hash, g_str_equal, NULL, _listener_destroy);
+    hsc->listeners = g_hash_table_new_full(g_str_hash, g_str_equal, NULL, _registry_destroy_listener);
   return hsc->listeners;
 }
 
@@ -543,7 +536,6 @@ http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint por
     }
 
   listener = _listener_new(key, bind_addr, port);
-  listener->registry = registry;
   if (_listener_start(listener))
     g_hash_table_insert(registry, listener->key, listener);
   else
@@ -557,10 +549,11 @@ http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint por
 }
 
 void
-http_server_listener_release(HTTPServerListener *listener)
+http_server_listener_release(GlobalConfig *cfg, HTTPServerListener *listener)
 {
+  GHashTable *registry = _get_registry(cfg);
   /* the last reference removes the listener from the registry, which destroys
    * it (stop + free) via the hash table's value-destroy function */
   if (--listener->user_count == 0)
-    g_hash_table_remove(listener->registry, listener->key);
+    g_hash_table_remove(registry, listener->key);
 }

@@ -69,7 +69,7 @@ typedef void (*HTTPServerRequestCompletion)(gpointer user_data, struct MHD_Conne
  * wakeup() helpers are thread-safe.
  */
 HTTPServerListener *http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint port);
-void http_server_listener_release(HTTPServerListener *self);
+void http_server_listener_release(GlobalConfig *cfg, HTTPServerListener *self);
 
 /* start the listener thread (idempotent); call from post_config_init */
 gboolean http_server_listener_start(HTTPServerListener *self);
