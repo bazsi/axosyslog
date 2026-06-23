@@ -46,7 +46,6 @@ debian/build-tree/
 debian/*.log
 debian/autoreconf.*
 build/
-/install/
 tests/light/reports
 tests/light/*.session.pickle
 tags
