@@ -57,7 +57,6 @@ struct HTTPServerListener
   gint port;
   gint user_count;
 
-  gint listen_fd;
   struct sockaddr_storage bind_sa;
   gboolean has_bind_sa;
 
@@ -68,7 +67,7 @@ struct HTTPServerListener
   gboolean thread_started;
 
   /* the following live on the listener thread once it is running */
-  struct iv_fd listen_iv_fd;
+  struct iv_fd listen_fd;
   struct iv_event wakeup_event;
   struct iv_event stop_event;
   GList *connections;           /* all open HTTPServerConnection * */
@@ -516,7 +515,7 @@ _listener_accept(void *cookie)
     {
       struct sockaddr_storage ss;
       socklen_t slen = sizeof(ss);
-      gint fd = accept(self->listen_fd, (struct sockaddr *) &ss, &slen);
+      gint fd = accept(self->listen_fd.fd, (struct sockaddr *) &ss, &slen);
       if (fd < 0)
         {
           if (errno == EINTR)
@@ -563,20 +562,8 @@ _listener_thread_run(MainLoopThreadedWorker *t)
 {
   HTTPServerListener *self = (HTTPServerListener *) t->data;
 
-  IV_FD_INIT(&self->listen_iv_fd);
-  self->listen_iv_fd.fd = self->listen_fd;
-  self->listen_iv_fd.cookie = self;
-  self->listen_iv_fd.handler_in = _listener_accept;
-  iv_fd_register(&self->listen_iv_fd);
-
-  IV_EVENT_INIT(&self->wakeup_event);
-  self->wakeup_event.cookie = self;
-  self->wakeup_event.handler = _wakeup_event_handler;
+  iv_fd_register(&self->listen_fd);
   iv_event_register(&self->wakeup_event);
-
-  IV_EVENT_INIT(&self->stop_event);
-  self->stop_event.cookie = self;
-  self->stop_event.handler = _stop_event_handler;
   iv_event_register(&self->stop_event);
 
   g_atomic_counter_set(&self->events_ready, 1);
@@ -586,7 +573,7 @@ _listener_thread_run(MainLoopThreadedWorker *t)
   g_atomic_counter_set(&self->events_ready, 0);
   iv_event_unregister(&self->wakeup_event);
   iv_event_unregister(&self->stop_event);
-  iv_fd_unregister(&self->listen_iv_fd);
+  iv_fd_unregister(&self->listen_fd);
 
   _destroy_all_connections(self);
 }
@@ -722,8 +709,8 @@ _open_listen_socket(HTTPServerListener *self)
     {
       socklen_t salen = (self->bind_sa.ss_family == AF_INET6)
                         ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
-      self->listen_fd = _open_socket(self->bind_sa.ss_family,
-                                     (struct sockaddr *) &self->bind_sa, salen, FALSE);
+      self->listen_fd.fd = _open_socket(self->bind_sa.ss_family,
+                                        (struct sockaddr *) &self->bind_sa, salen, FALSE);
     }
   else
     {
@@ -733,9 +720,9 @@ _open_listen_socket(HTTPServerListener *self)
       sin6.sin6_family = AF_INET6;
       sin6.sin6_addr = in6addr_any;
       sin6.sin6_port = htons((guint16) self->port);
-      self->listen_fd = _open_socket(AF_INET6, (struct sockaddr *) &sin6, sizeof(sin6), TRUE);
+      self->listen_fd.fd = _open_socket(AF_INET6, (struct sockaddr *) &sin6, sizeof(sin6), TRUE);
 
-      if (self->listen_fd < 0)
+      if (self->listen_fd.fd < 0)
         {
           msg_debug("http(): could not open a dual-stack listener, falling back to IPv4",
                     evt_tag_int("port", self->port));
@@ -744,11 +731,11 @@ _open_listen_socket(HTTPServerListener *self)
           sin.sin_family = AF_INET;
           sin.sin_addr.s_addr = htonl(INADDR_ANY);
           sin.sin_port = htons((guint16) self->port);
-          self->listen_fd = _open_socket(AF_INET, (struct sockaddr *) &sin, sizeof(sin), FALSE);
+          self->listen_fd.fd = _open_socket(AF_INET, (struct sockaddr *) &sin, sizeof(sin), FALSE);
         }
     }
 
-  if (self->listen_fd < 0)
+  if (self->listen_fd.fd < 0)
     {
       msg_error("http(): failed to start HTTP listener",
                 evt_tag_str("ip", self->bind_addr), evt_tag_int("port", self->port),
@@ -773,10 +760,10 @@ _listener_stop(HTTPServerListener *self)
   if (self->thread_started)
     main_loop_threaded_worker_clear(&self->thread);
 
-  if (self->listen_fd >= 0)
+  if (self->listen_fd.fd >= 0)
     {
-      close(self->listen_fd);
-      self->listen_fd = -1;
+      close(self->listen_fd.fd);
+      self->listen_fd.fd = -1;
     }
 }
 
@@ -809,10 +796,22 @@ _listener_new(const gchar *key, const gchar *bind_addr, gint port)
   self->key = g_strdup(key);
   self->bind_addr = g_strdup(bind_addr ? bind_addr : "");
   self->port = port;
-  self->listen_fd = -1;
   g_mutex_init(&self->lock);
   g_atomic_counter_set(&self->events_ready, 0);
   self->paths = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+
+  IV_FD_INIT(&self->listen_fd);
+  self->listen_fd.fd = -1;
+  self->listen_fd.cookie = self;
+  self->listen_fd.handler_in = _listener_accept;
+
+  IV_EVENT_INIT(&self->wakeup_event);
+  self->wakeup_event.cookie = self;
+  self->wakeup_event.handler = _wakeup_event_handler;
+
+  IV_EVENT_INIT(&self->stop_event);
+  self->stop_event.cookie = self;
+  self->stop_event.handler = _stop_event_handler;
 
   main_loop_threaded_worker_init(&self->thread, MLW_THREADED_INPUT_WORKER, self);
   self->thread.run = _listener_thread_run;
@@ -823,7 +822,7 @@ _listener_new(const gchar *key, const gchar *bind_addr, gint port)
 static void
 _listener_free(HTTPServerListener *self)
 {
-  g_assert(self->listen_fd == -1);
+  g_assert(self->listen_fd.fd == -1);
   g_hash_table_unref(self->paths);
   g_mutex_clear(&self->lock);
   g_free(self->key);
