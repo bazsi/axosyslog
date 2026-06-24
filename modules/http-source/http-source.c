@@ -35,22 +35,14 @@
  * A minimal LogSource: the listener thread (a registered mainloop worker
  * thread) posts messages into it directly via log_source_post().  We only
  * override wakeup(), which the flow-control/ack path calls when the window
- * reopens, to resume the connections suspended on this source.
- *
- * MHD calls into this source (it is the user_data of the registered path), so
- * it owns the set of connections suspended because of flow control: the
- * listener thread suspends them when the window fills, and the ack path
- * resumes them via wakeup() when the window reopens.
+ * reopens, to wake the listener so it retries the connections it suspended
+ * for this source.  The listener owns the suspended-connection bookkeeping
+ * (it owns the connections); the source just signals it.
  */
 typedef struct _HTTPSource
 {
   LogSource super;
   HTTPServerListener *listener;
-
-  /* connections suspended because this source's flow-control window is full;
-   * touched by the listener thread (suspend) and the ack path (resume) */
-  GMutex backpressure_lock;
-  GList *suspended_connections;
 } HTTPSource;
 
 struct HTTPSourceDriver
@@ -67,21 +59,27 @@ struct HTTPSourceDriver
   HTTPSource *source;
 };
 
-static void _resume_all_connections(HTTPSource *self);
-
-/* LogSource wakeup: the window reopened, resume the suspended connections */
+/* LogSource wakeup: the window reopened, ask the listener to retry suspended
+ * connections (runs on the ack path, possibly off the listener thread) */
 static void
 _source_wakeup(LogSource *s)
 {
-  _resume_all_connections((HTTPSource *) s);
+  HTTPSource *self = (HTTPSource *) s;
+  if (self->listener)
+    http_server_listener_wakeup(self->listener);
 }
 
 /*
  * HTTPServerRequestHandler: runs on the listener thread.  Posts the body line
- * by line; on a full window the connection is suspended and resumed later.
+ * by line; on a full window the connection is suspended and retried later.
+ *
+ * No locking is needed around the window check: this handler and the listener's
+ * retry-on-wakeup both run on the listener thread, so they never interleave.  A
+ * window reopen arriving from another thread is delivered as an event processed
+ * after this handler returns, so a suspended connection is always retried.
  */
 static HTTPServerRequestResult
-_handle_request_body(gpointer user_data, struct MHD_Connection *connection,
+_handle_request_body(gpointer user_data, HTTPServerConnection *connection,
                      const gchar *body, gsize body_len, gsize *offset, GSockAddr *peer)
 {
   HTTPSource *self = (HTTPSource *) user_data;
@@ -103,23 +101,14 @@ _handle_request_body(gpointer user_data, struct MHD_Connection *connection,
           continue;
         }
 
-      /* fast path check, then re-check under the lock to close the race with
-       * a concurrent window reopen (_source_wakeup) */
       if (!log_source_free_to_send(&self->super))
         {
-          g_mutex_lock(&self->backpressure_lock);
-          if (!log_source_free_to_send(&self->super))
-            {
-              http_server_listener_suspend_connection(connection);
-              self->suspended_connections = g_list_prepend(self->suspended_connections, connection);
-              g_mutex_unlock(&self->backpressure_lock);
+          http_server_listener_suspend_connection(connection);
 
-              /* flush what we have already posted so the destination can drain
-               * it and reopen the window (otherwise the resume never comes) */
-              main_loop_worker_invoke_batch_callbacks();
-              return HTTP_SERVER_REQUEST_SUSPENDED;
-            }
-          g_mutex_unlock(&self->backpressure_lock);
+          /* flush what we have already posted so the destination can drain
+           * it and reopen the window (otherwise the wakeup never comes) */
+          main_loop_worker_invoke_batch_callbacks();
+          return HTTP_SERVER_REQUEST_SUSPENDED;
         }
 
       LogMessage *msg = log_msg_new_empty();
@@ -136,58 +125,14 @@ _handle_request_body(gpointer user_data, struct MHD_Connection *connection,
   return HTTP_SERVER_REQUEST_COMPLETE;
 }
 
-/* HTTPServerRequestCompletion: drop the connection from the suspended set */
-static void
-_request_completed(gpointer user_data, struct MHD_Connection *connection)
-{
-  HTTPSource *self = (HTTPSource *) user_data;
-
-  g_mutex_lock(&self->backpressure_lock);
-  self->suspended_connections = g_list_remove(self->suspended_connections, connection);
-  g_mutex_unlock(&self->backpressure_lock);
-}
-
-static void
-_http_source_free(LogPipe *s)
-{
-  HTTPSource *self = (HTTPSource *) s;
-
-  g_list_free(self->suspended_connections);
-  g_mutex_clear(&self->backpressure_lock);
-  log_source_free(s);
-}
-
 static HTTPSource *
 _http_source_new(GlobalConfig *cfg)
 {
   HTTPSource *self = g_new0(HTTPSource, 1);
   log_source_init_instance(&self->super, cfg);
-  self->super.super.free_fn = _http_source_free;
   self->super.wakeup = _source_wakeup;
-  g_mutex_init(&self->backpressure_lock);
   return self;
 }
-
-
-static void
-_resume_all_connections(HTTPSource *self)
-{
-  g_mutex_lock(&self->backpressure_lock);
-  GList *to_resume = self->suspended_connections;
-  self->suspended_connections = NULL;
-  g_mutex_unlock(&self->backpressure_lock);
-
-  if (!to_resume)
-    return;
-
-  for (GList *l = to_resume; l; l = l->next)
-    http_server_listener_resume_connection((struct MHD_Connection *) l->data);
-  g_list_free(to_resume);
-
-  if (self->listener)
-    http_server_listener_wakeup(self->listener);
-}
-
 
 
 static void
@@ -262,12 +207,12 @@ _init(LogPipe *s)
   if (!self->listener)
     return FALSE;
 
-  /* the source resumes its suspended connections through the listener it is
-   * registered on */
+  /* the source wakes the listener (to retry suspended connections) through the
+   * listener it is registered on */
   self->source->listener = self->listener;
 
   http_server_listener_register_path(self->listener, self->path,
-                                     _handle_request_body, _request_completed, self->source,
+                                     _handle_request_body, NULL, self->source,
                                      self->max_request_size);
   return TRUE;
 }
@@ -280,10 +225,6 @@ _deinit(LogPipe *s)
 
   if (self->listener)
     http_server_listener_unregister_path(self->listener, self->path, self->source);
-
-  /* unblock any connection still waiting on our window so it can finish */
-  if (self->source)
-    _resume_all_connections(self->source);
 
   if (self->source)
     {

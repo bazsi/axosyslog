@@ -1610,18 +1610,14 @@ else
 fi
 
 dnl ***************************************************************************
-dnl libmicrohttpd headers/libraries (http source / HTTP server)
+dnl http source / HTTP server
+dnl
+dnl The HTTP server is built on a vendored copy of llhttp (see
+dnl modules/http-source/llhttp) and ivykis, so it has no external dependency
+dnl and is enabled unless explicitly disabled.
 dnl ***************************************************************************
 if test "x$enable_http_source" != "xno"; then
-	PKG_CHECK_MODULES(LIBMICROHTTPD, libmicrohttpd,
-		[have_libmicrohttpd="yes"], [have_libmicrohttpd="no"])
-
-	if test "x$enable_http_source" = "xyes" && test "x$have_libmicrohttpd" = "xno"; then
-		AC_MSG_ERROR(libmicrohttpd not found)
-	fi
-	enable_http_source=$have_libmicrohttpd
-else
-	enable_http_source="no"
+	enable_http_source="yes"
 fi
 
 dnl ***************************************************************************

@@ -1,14 +1,6 @@
-if (NOT DEFINED ENABLE_HTTP_SOURCE OR ENABLE_HTTP_SOURCE)
-  find_package(LibMHD)
-endif()
-
-module_switch(ENABLE_HTTP_SOURCE "Enable http source" LibMHD_FOUND)
+module_switch(ENABLE_HTTP_SOURCE "Enable http source")
 if (NOT ENABLE_HTTP_SOURCE)
   return ()
-endif ()
-
-if (NOT LibMHD_FOUND)
-  message(FATAL_ERROR "HTTP source module enabled, but libmicrohttpd not found")
 endif ()
 
 set(HTTP_SOURCE_SOURCES
@@ -21,12 +13,20 @@ set(HTTP_SOURCE_SOURCES
     http-source-parser.c
     http-source-parser.h
     http-source-plugin.c
+    llhttp/llhttp.c
+    llhttp/api.c
+    llhttp/http.c
+)
+
+# llhttp is vendored, pre-generated code; do not warn about it
+set_source_files_properties(
+    llhttp/llhttp.c llhttp/api.c llhttp/http.c
+    PROPERTIES COMPILE_OPTIONS "-w"
 )
 
 add_module(
   TARGET http-source
   GRAMMAR http-source-grammar
-  INCLUDES ${LibMHD_INCLUDE_DIR}
-  DEPENDS ${LibMHD_LIBRARIES}
+  INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/llhttp
   SOURCES ${HTTP_SOURCE_SOURCES}
 )

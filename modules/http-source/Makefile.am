@@ -11,15 +11,19 @@ modules_http_source_libhttp_source_la_SOURCES = \
   modules/http-source/http-source-grammar.y       \
   modules/http-source/http-source-parser.c        \
   modules/http-source/http-source-parser.h        \
-  modules/http-source/http-source-plugin.c
+  modules/http-source/http-source-plugin.c        \
+  modules/http-source/llhttp/llhttp.h             \
+  modules/http-source/llhttp/llhttp.c             \
+  modules/http-source/llhttp/api.c                \
+  modules/http-source/llhttp/http.c
 
 modules_http_source_libhttp_source_la_CPPFLAGS  = \
   $(AM_CPPFLAGS)                          \
-  $(LIBMICROHTTPD_CFLAGS)                 \
   -I$(top_srcdir)/modules/http-source     \
-  -I$(top_builddir)/modules/http-source
+  -I$(top_builddir)/modules/http-source   \
+  -I$(top_srcdir)/modules/http-source/llhttp
 
-modules_http_source_libhttp_source_la_LIBADD  = $(MODULE_DEPS_LIBS) $(LIBMICROHTTPD_LIBS)
+modules_http_source_libhttp_source_la_LIBADD  = $(MODULE_DEPS_LIBS)
 
 modules_http_source_libhttp_source_la_LDFLAGS = $(MODULE_LDFLAGS)
 
@@ -37,6 +41,7 @@ BUILT_SOURCES       +=      \
 
 EXTRA_DIST        +=      \
   modules/http-source/http-source-grammar.ym       \
+  modules/http-source/llhttp/LICENSE               \
   modules/http-source/CMakeLists.txt
 
 .PHONY: modules/http-source/ mod-http-source

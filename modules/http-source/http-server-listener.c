@@ -27,24 +27,20 @@
 #include "atomic.h"
 #include "gsockaddr.h"
 
-#include <microhttpd.h>
+#include "llhttp.h"
+
+#include <iv.h>
+#include <iv_event.h>
 
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/select.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-/* the "request entity too large" status code was spelled differently across
- * libmicrohttpd releases (and the older spellings are now deprecated) */
-#if defined(MHD_HTTP_CONTENT_TOO_LARGE)
-#define HTTP_STATUS_TOO_LARGE MHD_HTTP_CONTENT_TOO_LARGE
-#else
-#define HTTP_STATUS_TOO_LARGE 413
-#endif
+#define HTTP_READ_BUFFER_SIZE 16384
 
 typedef struct _PathRegistration
 {
@@ -61,7 +57,7 @@ struct HTTPServerListener
   gint port;
   gint user_count;
 
-  struct MHD_Daemon *daemon;
+  gint listen_fd;
   struct sockaddr_storage bind_sa;
   gboolean has_bind_sa;
 
@@ -70,214 +66,536 @@ struct HTTPServerListener
 
   MainLoopThreadedWorker thread;
   gboolean thread_started;
-  GAtomicCounter stop_requested;
-  gint wakeup_pipe[2];
+
+  /* the following live on the listener thread once it is running */
+  struct iv_fd listen_iv_fd;
+  struct iv_event wakeup_event;
+  struct iv_event stop_event;
+  GList *connections;           /* all open HTTPServerConnection * */
+  GList *suspended;             /* connections paused for flow control */
+  GAtomicCounter events_ready;  /* the cross-thread events are registered */
 };
 
-typedef struct _RequestContext
+struct HTTPServerConnection
 {
-  GString *body;
-  gsize offset;
-  gchar *path;
+  HTTPServerListener *listener;
+  gint fd;
+  struct iv_fd iv_fd;
+  struct iv_task free_task;
   GSockAddr *peer;
-  gboolean too_large;
-} RequestContext;
 
-static const char *RESPONSE_OK = "";
-static const char *RESPONSE_NOT_FOUND = "no source registered for this path\n";
-static const char *RESPONSE_METHOD_NOT_ALLOWED = "only POST is supported\n";
-static const char *RESPONSE_TOO_LARGE = "request body too large\n";
+  llhttp_t parser;
 
-static enum MHD_Result
-_send_response(struct MHD_Connection *connection, unsigned int status, const char *text)
-{
-  struct MHD_Response *response =
-    MHD_create_response_from_buffer(strlen(text), (void *) text, MHD_RESPMEM_PERSISTENT);
-  if (!response)
-    return MHD_NO;
+  /* request being parsed */
+  GString *url;
+  GString *body;
+  gchar *path;                  /* request path with the query string stripped */
+  guint resp_status;            /* non-zero: an error response to send instead of dispatching */
 
-  enum MHD_Result ret = MHD_queue_response(connection, status, response);
-  MHD_destroy_response(response);
-  return ret;
-}
+  /* dispatch */
+  gsize max_request_size;
+  gsize offset;                 /* request handler progress into body */
+  gboolean suspended;
+  gboolean keep_alive;
 
-static GSockAddr *
-_extract_peer_addr(struct MHD_Connection *connection)
-{
-  const union MHD_ConnectionInfo *info =
-    MHD_get_connection_info(connection, MHD_CONNECTION_INFO_CLIENT_ADDRESS);
+  /* response */
+  GString *write_buf;
+  gsize write_offset;
+  gboolean should_close;
+  gboolean closing;
+};
 
-  if (!info || !info->client_addr)
-    return NULL;
+static llhttp_settings_t http_settings;
 
-  struct sockaddr *sa = info->client_addr;
-  socklen_t salen = (sa->sa_family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
-  return g_sockaddr_new(sa, salen);
-}
+static void _conn_read_handler(void *cookie);
+static void _conn_write_handler(void *cookie);
+static void _conn_close(HTTPServerConnection *conn);
+static HTTPServerRequestResult _conn_dispatch(HTTPServerConnection *conn);
 
-/* copy the registration for a path into *out (so it stays valid without
- * holding the lock); returns FALSE if no registration exists for the path */
+/* --- path registry lookups --------------------------------------------- */
+
 static gboolean
 _lookup_registration(HTTPServerListener *self, const gchar *path, PathRegistration *out)
 {
   g_mutex_lock(&self->lock);
-  PathRegistration *reg = g_hash_table_lookup(self->paths, path);
+  PathRegistration *reg = path ? g_hash_table_lookup(self->paths, path) : NULL;
   if (reg)
     *out = *reg;
   g_mutex_unlock(&self->lock);
   return reg != NULL;
 }
 
-static enum MHD_Result
-_handle_request(void *cls, struct MHD_Connection *connection,
-                const char *url, const char *method, const char *version,
-                const char *upload_data, size_t *upload_data_size, void **con_cls)
-{
-  HTTPServerListener *self = (HTTPServerListener *) cls;
-  RequestContext *ctx = (RequestContext *) *con_cls;
+/* --- response handling ------------------------------------------------- */
 
+static const gchar *
+_reason_phrase(guint status)
+{
+  switch (status)
+    {
+    case 200:
+      return "OK";
+    case 400:
+      return "Bad Request";
+    case 404:
+      return "Not Found";
+    case 405:
+      return "Method Not Allowed";
+    case 413:
+      return "Content Too Large";
+    default:
+      return "Internal Server Error";
+    }
+}
+
+static const gchar *
+_response_body(guint status)
+{
+  switch (status)
+    {
+    case 404:
+      return "no source registered for this path\n";
+    case 405:
+      return "only POST is supported\n";
+    case 413:
+      return "request body too large\n";
+    case 200:
+      return "";
+    default:
+      return "internal server error\n";
+    }
+}
+
+static void
+_conn_queue_response(HTTPServerConnection *conn, guint status)
+{
+  const gchar *body = _response_body(status);
+  gboolean keep_alive = conn->keep_alive && status == 200;
+
+  g_string_append_printf(conn->write_buf,
+                         "HTTP/1.1 %u %s\r\n"
+                         "Content-Length: %zu\r\n"
+                         "Connection: %s\r\n"
+                         "\r\n",
+                         status, _reason_phrase(status), strlen(body),
+                         keep_alive ? "keep-alive" : "close");
+  g_string_append(conn->write_buf, body);
+
+  if (!keep_alive)
+    conn->should_close = TRUE;
+}
+
+/* try to flush the pending response; register handler_out on a short write */
+static void
+_conn_flush(HTTPServerConnection *conn)
+{
+  while (conn->write_offset < conn->write_buf->len)
+    {
+      ssize_t n = write(conn->fd, conn->write_buf->str + conn->write_offset,
+                        conn->write_buf->len - conn->write_offset);
+      if (n > 0)
+        {
+          conn->write_offset += n;
+          continue;
+        }
+      if (n < 0 && errno == EINTR)
+        continue;
+      if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+          iv_fd_set_handler_out(&conn->iv_fd, _conn_write_handler);
+          return;
+        }
+      _conn_close(conn);
+      return;
+    }
+
+  g_string_truncate(conn->write_buf, 0);
+  conn->write_offset = 0;
+  iv_fd_set_handler_out(&conn->iv_fd, NULL);
+
+  if (conn->should_close)
+    _conn_close(conn);
+  else
+    iv_fd_set_handler_in(&conn->iv_fd, _conn_read_handler);
+}
+
+static void
+_conn_write_handler(void *cookie)
+{
+  _conn_flush((HTTPServerConnection *) cookie);
+}
+
+/* --- llhttp callbacks (run on the listener thread) --------------------- */
+
+static int
+_on_message_begin(llhttp_t *parser)
+{
+  HTTPServerConnection *conn = parser->data;
+
+  g_string_truncate(conn->url, 0);
+  g_string_truncate(conn->body, 0);
+  g_free(conn->path);
+  conn->path = NULL;
+  conn->resp_status = 0;
+  conn->offset = 0;
+  conn->max_request_size = 0;
+  return 0;
+}
+
+static int
+_on_url(llhttp_t *parser, const char *at, size_t length)
+{
+  HTTPServerConnection *conn = parser->data;
+  g_string_append_len(conn->url, at, length);
+  return 0;
+}
+
+static int
+_on_headers_complete(llhttp_t *parser)
+{
+  HTTPServerConnection *conn = parser->data;
   PathRegistration reg;
 
-  if (!ctx)
+  /* strip the query string: routing matches the path only */
+  const gchar *q = strchr(conn->url->str, '?');
+  conn->path = q ? g_strndup(conn->url->str, q - conn->url->str) : g_strdup(conn->url->str);
+
+  if (llhttp_get_method(parser) != HTTP_POST)
+    conn->resp_status = 405;
+  else if (!_lookup_registration(conn->listener, conn->path, &reg))
+    conn->resp_status = 404;
+  else
+    conn->max_request_size = reg.max_request_size;
+
+  return 0;
+}
+
+static int
+_on_body(llhttp_t *parser, const char *at, size_t length)
+{
+  HTTPServerConnection *conn = parser->data;
+
+  /* an error response is already decided; just drain the rest of the body */
+  if (conn->resp_status != 0)
+    return 0;
+
+  if (conn->max_request_size && conn->body->len + length > conn->max_request_size)
     {
-      if (strcmp(method, MHD_HTTP_METHOD_POST) != 0)
-        return _send_response(connection, MHD_HTTP_METHOD_NOT_ALLOWED, RESPONSE_METHOD_NOT_ALLOWED);
-
-      if (!_lookup_registration(self, url, &reg))
-        return _send_response(connection, MHD_HTTP_NOT_FOUND, RESPONSE_NOT_FOUND);
-
-      ctx = g_new0(RequestContext, 1);
-      ctx->body = g_string_sized_new(1024);
-      ctx->path = g_strdup(url);
-      *con_cls = ctx;
-      return MHD_YES;
+      conn->resp_status = 413;
+      g_string_truncate(conn->body, 0);
+      return 0;
     }
 
-  if (*upload_data_size != 0)
-    {
-      if (_lookup_registration(self, ctx->path, &reg) &&
-          reg.max_request_size && ctx->body->len + *upload_data_size > reg.max_request_size)
-        ctx->too_large = TRUE;
-      else
-        g_string_append_len(ctx->body, upload_data, *upload_data_size);
+  g_string_append_len(conn->body, at, length);
+  return 0;
+}
 
-      *upload_data_size = 0;
-      return MHD_YES;
+static int
+_on_message_complete(llhttp_t *parser)
+{
+  HTTPServerConnection *conn = parser->data;
+  conn->keep_alive = llhttp_should_keep_alive(parser);
+
+  if (conn->resp_status != 0)
+    {
+      _conn_queue_response(conn, conn->resp_status);
+      return 0;
     }
 
-  if (ctx->too_large)
-    return _send_response(connection, HTTP_STATUS_TOO_LARGE, RESPONSE_TOO_LARGE);
+  if (_conn_dispatch(conn) == HTTP_SERVER_REQUEST_SUSPENDED)
+    {
+      /* leave the connection paused; it is retried on wakeup */
+      llhttp_pause(parser);
+      return HPE_PAUSED;
+    }
 
-  if (!_lookup_registration(self, ctx->path, &reg))
-    return _send_response(connection, MHD_HTTP_NOT_FOUND, RESPONSE_NOT_FOUND);
+  return 0;
+}
 
-  if (!ctx->peer)
-    ctx->peer = _extract_peer_addr(connection);
+/* resolve the handler and run it from the saved offset; queues a 200 (or 404
+ * if the path went away) when the body has been fully processed */
+static HTTPServerRequestResult
+_conn_dispatch(HTTPServerConnection *conn)
+{
+  PathRegistration reg;
+
+  if (!_lookup_registration(conn->listener, conn->path, &reg))
+    {
+      _conn_queue_response(conn, 404);
+      return HTTP_SERVER_REQUEST_COMPLETE;
+    }
 
   HTTPServerRequestResult result =
-    reg.handler(reg.user_data, connection, ctx->body->str, ctx->body->len, &ctx->offset, ctx->peer);
+    reg.handler(reg.user_data, conn, conn->body->str, conn->body->len, &conn->offset, conn->peer);
 
-  if (result == HTTP_SERVER_REQUEST_SUSPENDED)
-    return MHD_YES;
+  if (result == HTTP_SERVER_REQUEST_COMPLETE)
+    _conn_queue_response(conn, 200);
 
-  return _send_response(connection, MHD_HTTP_OK, RESPONSE_OK);
+  return result;
+}
+
+/* --- connection lifecycle ---------------------------------------------- */
+
+static void
+_conn_destroy(HTTPServerConnection *conn)
+{
+  if (iv_task_registered(&conn->free_task))
+    iv_task_unregister(&conn->free_task);
+  if (iv_fd_registered(&conn->iv_fd))
+    iv_fd_unregister(&conn->iv_fd);
+  if (conn->fd >= 0)
+    close(conn->fd);
+
+  g_string_free(conn->url, TRUE);
+  g_string_free(conn->body, TRUE);
+  g_string_free(conn->write_buf, TRUE);
+  g_free(conn->path);
+  g_sockaddr_unref(conn->peer);
+  g_free(conn);
+}
+
+/* deferred free: keep the connection alive until the current callback unwinds */
+static void
+_conn_free_task(void *cookie)
+{
+  _conn_destroy((HTTPServerConnection *) cookie);
 }
 
 static void
-_request_completed(void *cls, struct MHD_Connection *connection,
-                   void **con_cls, enum MHD_RequestTerminationCode toe)
+_conn_close(HTTPServerConnection *conn)
 {
-  HTTPServerListener *self = (HTTPServerListener *) cls;
-  RequestContext *ctx = (RequestContext *) *con_cls;
-  if (!ctx)
+  if (conn->closing)
     return;
+  conn->closing = TRUE;
+
+  if (iv_fd_registered(&conn->iv_fd))
+    iv_fd_unregister(&conn->iv_fd);
+  if (conn->fd >= 0)
+    {
+      close(conn->fd);
+      conn->fd = -1;
+    }
+
+  conn->listener->connections = g_list_remove(conn->listener->connections, conn);
+  conn->listener->suspended = g_list_remove(conn->listener->suspended, conn);
 
   PathRegistration reg;
-  if (ctx->path && _lookup_registration(self, ctx->path, &reg))
-    reg.completion(reg.user_data, connection);
+  if (conn->path && _lookup_registration(conn->listener, conn->path, &reg) && reg.completion)
+    reg.completion(reg.user_data, conn);
 
-  g_string_free(ctx->body, TRUE);
-  g_free(ctx->path);
-  g_sockaddr_unref(ctx->peer);
-  g_free(ctx);
-  *con_cls = NULL;
+  iv_task_register(&conn->free_task);
 }
 
 static void
-_drive(HTTPServerListener *self)
+_conn_read_handler(void *cookie)
 {
-  while (!g_atomic_counter_get(&self->stop_requested))
+  HTTPServerConnection *conn = (HTTPServerConnection *) cookie;
+  gchar buf[HTTP_READ_BUFFER_SIZE];
+
+  ssize_t n = read(conn->fd, buf, sizeof(buf));
+  if (n == 0)
     {
-      fd_set rs, ws, es;
-      FD_ZERO(&rs);
-      FD_ZERO(&ws);
-      FD_ZERO(&es);
-
-      int max_fd = -1;
-      if (MHD_get_fdset(self->daemon, &rs, &ws, &es, &max_fd) != MHD_YES)
-        {
-          msg_error("http(): failed to query libmicrohttpd socket set, stopping listener",
-                    evt_tag_int("port", self->port));
-          break;
-        }
-
-      int wakeup_fd = self->wakeup_pipe[0];
-      FD_SET(wakeup_fd, &rs);
-      if (wakeup_fd > max_fd)
-        max_fd = wakeup_fd;
-
-      struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-      MHD_UNSIGNED_LONG_LONG mhd_timeout;
-      if (MHD_get_timeout(self->daemon, &mhd_timeout) == MHD_YES)
-        {
-          tv.tv_sec = mhd_timeout / 1000;
-          tv.tv_usec = (mhd_timeout % 1000) * 1000;
-        }
-
-      int rc = select(max_fd + 1, &rs, &ws, &es, &tv);
-      if (rc < 0 && errno != EINTR)
-        {
-          msg_error("http(): select() failed on listener, stopping",
-                    evt_tag_int("port", self->port), evt_tag_error("error"));
-          break;
-        }
-
-      if (FD_ISSET(wakeup_fd, &rs))
-        {
-          gchar buf[64];
-          while (read(wakeup_fd, buf, sizeof(buf)) > 0)
-            ;
-        }
-
-      MHD_run(self->daemon);
+      _conn_close(conn);
+      return;
     }
+  if (n < 0)
+    {
+      if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+        return;
+      _conn_close(conn);
+      return;
+    }
+
+  enum llhttp_errno err = llhttp_execute(&conn->parser, buf, n);
+
+  if (conn->closing)
+    return;
+
+  if (err != HPE_OK && err != HPE_PAUSED)
+    {
+      _conn_queue_response(conn, 400);
+      conn->should_close = TRUE;
+    }
+
+  if (conn->write_buf->len > conn->write_offset)
+    _conn_flush(conn);
 }
 
 static void
-_request_stop(HTTPServerListener *self)
+_conn_error_handler(void *cookie)
 {
-  g_atomic_counter_set(&self->stop_requested, 1);
-  http_server_listener_wakeup(self);
+  _conn_close((HTTPServerConnection *) cookie);
+}
+
+static HTTPServerConnection *
+_conn_new(HTTPServerListener *listener, gint fd, struct sockaddr *sa, socklen_t salen)
+{
+  HTTPServerConnection *conn = g_new0(HTTPServerConnection, 1);
+  conn->listener = listener;
+  conn->fd = fd;
+  conn->peer = g_sockaddr_new(sa, salen);
+  conn->url = g_string_sized_new(64);
+  conn->body = g_string_sized_new(1024);
+  conn->write_buf = g_string_sized_new(128);
+
+  llhttp_init(&conn->parser, HTTP_REQUEST, &http_settings);
+  conn->parser.data = conn;
+
+  IV_TASK_INIT(&conn->free_task);
+  conn->free_task.cookie = conn;
+  conn->free_task.handler = _conn_free_task;
+
+  IV_FD_INIT(&conn->iv_fd);
+  conn->iv_fd.fd = fd;
+  conn->iv_fd.cookie = conn;
+  conn->iv_fd.handler_in = _conn_read_handler;
+  conn->iv_fd.handler_err = _conn_error_handler;
+  iv_fd_register(&conn->iv_fd);
+
+  return conn;
+}
+
+/* --- backpressure ------------------------------------------------------ */
+
+void
+http_server_listener_suspend_connection(HTTPServerConnection *conn)
+{
+  if (!conn->suspended)
+    {
+      conn->suspended = TRUE;
+      conn->listener->suspended = g_list_prepend(conn->listener->suspended, conn);
+    }
+  /* stop reading this connection until the window reopens */
+  iv_fd_set_handler_in(&conn->iv_fd, NULL);
+}
+
+static void
+_conn_retry(HTTPServerConnection *conn)
+{
+  conn->suspended = FALSE;
+  conn->listener->suspended = g_list_remove(conn->listener->suspended, conn);
+
+  if (_conn_dispatch(conn) == HTTP_SERVER_REQUEST_SUSPENDED)
+    {
+      http_server_listener_suspend_connection(conn);
+      return;
+    }
+
+  /* the message finished: leave the paused parser ready for the next request */
+  llhttp_resume(&conn->parser);
+  iv_fd_set_handler_in(&conn->iv_fd, _conn_read_handler);
+  _conn_flush(conn);
+}
+
+static void
+_wakeup_event_handler(void *cookie)
+{
+  HTTPServerListener *self = (HTTPServerListener *) cookie;
+
+  /* retry on a snapshot: _conn_retry mutates self->suspended */
+  GList *snapshot = g_list_copy(self->suspended);
+  for (GList *l = snapshot; l; l = l->next)
+    _conn_retry((HTTPServerConnection *) l->data);
+  g_list_free(snapshot);
 }
 
 void
 http_server_listener_wakeup(HTTPServerListener *self)
 {
-  gchar c = 'x';
-  if (write(self->wakeup_pipe[1], &c, 1) < 0)
-    ;
+  if (g_atomic_counter_get(&self->events_ready))
+    iv_event_post(&self->wakeup_event);
+}
+
+/* --- accept ------------------------------------------------------------ */
+
+static void
+_listener_accept(void *cookie)
+{
+  HTTPServerListener *self = (HTTPServerListener *) cookie;
+
+  for (;;)
+    {
+      struct sockaddr_storage ss;
+      socklen_t slen = sizeof(ss);
+      gint fd = accept(self->listen_fd, (struct sockaddr *) &ss, &slen);
+      if (fd < 0)
+        {
+          if (errno == EINTR)
+            continue;
+          if (errno == EAGAIN || errno == EWOULDBLOCK)
+            break;
+          msg_error("http(): failed to accept connection",
+                    evt_tag_int("port", self->port), evt_tag_error("error"));
+          break;
+        }
+
+      int flags = fcntl(fd, F_GETFL, 0);
+      fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+      HTTPServerConnection *conn = _conn_new(self, fd, (struct sockaddr *) &ss, slen);
+      self->connections = g_list_prepend(self->connections, conn);
+    }
+}
+
+/* --- listener thread --------------------------------------------------- */
+
+static void
+_stop_event_handler(void *cookie)
+{
+  (void) cookie;
+  iv_quit();
+}
+
+static void
+_destroy_all_connections(HTTPServerListener *self)
+{
+  GList *connections = self->connections;
+  self->connections = NULL;
+  g_list_free(self->suspended);
+  self->suspended = NULL;
+
+  for (GList *l = connections; l; l = l->next)
+    _conn_destroy((HTTPServerConnection *) l->data);
+  g_list_free(connections);
 }
 
 static void
 _listener_thread_run(MainLoopThreadedWorker *t)
 {
-  _drive((HTTPServerListener *) t->data);
+  HTTPServerListener *self = (HTTPServerListener *) t->data;
+
+  IV_FD_INIT(&self->listen_iv_fd);
+  self->listen_iv_fd.fd = self->listen_fd;
+  self->listen_iv_fd.cookie = self;
+  self->listen_iv_fd.handler_in = _listener_accept;
+  iv_fd_register(&self->listen_iv_fd);
+
+  IV_EVENT_INIT(&self->wakeup_event);
+  self->wakeup_event.cookie = self;
+  self->wakeup_event.handler = _wakeup_event_handler;
+  iv_event_register(&self->wakeup_event);
+
+  IV_EVENT_INIT(&self->stop_event);
+  self->stop_event.cookie = self;
+  self->stop_event.handler = _stop_event_handler;
+  iv_event_register(&self->stop_event);
+
+  g_atomic_counter_set(&self->events_ready, 1);
+
+  iv_main();
+
+  g_atomic_counter_set(&self->events_ready, 0);
+  iv_event_unregister(&self->wakeup_event);
+  iv_event_unregister(&self->stop_event);
+  iv_fd_unregister(&self->listen_iv_fd);
+
+  _destroy_all_connections(self);
 }
 
 static void
 _listener_thread_request_exit(MainLoopThreadedWorker *t)
 {
-  _request_stop((HTTPServerListener *) t->data);
+  HTTPServerListener *self = (HTTPServerListener *) t->data;
+  iv_event_post(&self->stop_event);
 }
 
 gboolean
@@ -289,6 +607,8 @@ http_server_listener_start(HTTPServerListener *self)
   self->thread_started = TRUE;
   return main_loop_threaded_worker_start(&self->thread);
 }
+
+/* --- path registration ------------------------------------------------- */
 
 gboolean
 http_server_listener_register_path(HTTPServerListener *self, const gchar *path,
@@ -316,7 +636,7 @@ http_server_listener_register_path(HTTPServerListener *self, const gchar *path,
 
 void
 http_server_listener_unregister_path(HTTPServerListener *self, const gchar *path,
-                                      gpointer user_data)
+                                     gpointer user_data)
 {
   g_mutex_lock(&self->lock);
 
@@ -329,17 +649,7 @@ http_server_listener_unregister_path(HTTPServerListener *self, const gchar *path
   g_mutex_unlock(&self->lock);
 }
 
-void
-http_server_listener_suspend_connection(struct MHD_Connection *connection)
-{
-  MHD_suspend_connection(connection);
-}
-
-void
-http_server_listener_resume_connection(struct MHD_Connection *connection)
-{
-  MHD_resume_connection(connection);
-}
+/* --- listen socket ----------------------------------------------------- */
 
 static gboolean
 _resolve_bind_addr(HTTPServerListener *self, const gchar *bind_addr)
@@ -376,99 +686,116 @@ _resolve_bind_addr(HTTPServerListener *self, const gchar *bind_addr)
   return FALSE;
 }
 
-static struct MHD_Daemon *
-_start_daemon_with_flags(HTTPServerListener *self, unsigned int flags)
+static gint
+_open_socket(int family, const struct sockaddr *sa, socklen_t salen, gboolean v6only_off)
 {
-  if (self->has_bind_sa)
-    return MHD_start_daemon(flags, (guint16) self->port, NULL, NULL,
-                            _handle_request, self,
-                            MHD_OPTION_NOTIFY_COMPLETED, _request_completed, self,
-                            MHD_OPTION_LISTENING_ADDRESS_REUSE, (unsigned int) 1,
-                            MHD_OPTION_SOCK_ADDR, (struct sockaddr *) &self->bind_sa,
-                            MHD_OPTION_END);
+  gint fd = socket(family, SOCK_STREAM, 0);
+  if (fd < 0)
+    return -1;
 
-  return MHD_start_daemon(flags, (guint16) self->port, NULL, NULL,
-                          _handle_request, self,
-                          MHD_OPTION_NOTIFY_COMPLETED, _request_completed, self,
-                          MHD_OPTION_LISTENING_ADDRESS_REUSE, (unsigned int) 1,
-                          MHD_OPTION_END);
+  int on = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+#ifdef SO_REUSEPORT
+  setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on));
+#endif
+  if (family == AF_INET6)
+    {
+      int v6only = v6only_off ? 0 : 1;
+      setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+    }
+
+  int flags = fcntl(fd, F_GETFL, 0);
+  fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+  if (bind(fd, sa, salen) < 0 || listen(fd, SOMAXCONN) < 0)
+    {
+      close(fd);
+      return -1;
+    }
+  return fd;
 }
 
 static gboolean
-_start_daemon(HTTPServerListener *self)
+_open_listen_socket(HTTPServerListener *self)
 {
-  /* external-polling mode (we drive MHD_run from our own thread) with
-   * suspend/resume enabled for per-connection flow control */
-  unsigned int base_flags = MHD_ALLOW_SUSPEND_RESUME;
-
-  if (!self->has_bind_sa)
+  if (self->has_bind_sa)
     {
-      self->daemon = _start_daemon_with_flags(self, base_flags | MHD_USE_DUAL_STACK);
-      if (self->daemon)
-        return TRUE;
+      socklen_t salen = (self->bind_sa.ss_family == AF_INET6)
+                        ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
+      self->listen_fd = _open_socket(self->bind_sa.ss_family,
+                                     (struct sockaddr *) &self->bind_sa, salen, FALSE);
+    }
+  else
+    {
+      /* wildcard: prefer a dual-stack IPv6 socket, fall back to IPv4-only */
+      struct sockaddr_in6 sin6;
+      memset(&sin6, 0, sizeof(sin6));
+      sin6.sin6_family = AF_INET6;
+      sin6.sin6_addr = in6addr_any;
+      sin6.sin6_port = htons((guint16) self->port);
+      self->listen_fd = _open_socket(AF_INET6, (struct sockaddr *) &sin6, sizeof(sin6), TRUE);
 
-      msg_debug("http(): could not open a dual-stack listener, falling back to IPv4",
-                evt_tag_int("port", self->port));
+      if (self->listen_fd < 0)
+        {
+          msg_debug("http(): could not open a dual-stack listener, falling back to IPv4",
+                    evt_tag_int("port", self->port));
+          struct sockaddr_in sin;
+          memset(&sin, 0, sizeof(sin));
+          sin.sin_family = AF_INET;
+          sin.sin_addr.s_addr = htonl(INADDR_ANY);
+          sin.sin_port = htons((guint16) self->port);
+          self->listen_fd = _open_socket(AF_INET, (struct sockaddr *) &sin, sizeof(sin), FALSE);
+        }
     }
 
-  self->daemon = _start_daemon_with_flags(self, base_flags);
-  if (!self->daemon)
+  if (self->listen_fd < 0)
     {
       msg_error("http(): failed to start HTTP listener",
-                evt_tag_str("ip", self->bind_addr), evt_tag_int("port", self->port));
+                evt_tag_str("ip", self->bind_addr), evt_tag_int("port", self->port),
+                evt_tag_error("error"));
       return FALSE;
     }
-
   return TRUE;
 }
 
 static gboolean
 _listener_start(HTTPServerListener *self)
 {
-  if (pipe(self->wakeup_pipe) < 0)
-    {
-      msg_error("http(): failed to create wakeup pipe for listener", evt_tag_error("error"));
-      goto error;
-    }
-  fcntl(self->wakeup_pipe[0], F_SETFL, O_NONBLOCK);
-  fcntl(self->wakeup_pipe[1], F_SETFL, O_NONBLOCK);
-
   if (!_resolve_bind_addr(self, self->bind_addr))
-    goto error;
+    return FALSE;
 
-  if (!_start_daemon(self))
-    goto error;
-
-  return TRUE;
-
-error:
-  if (self->wakeup_pipe[0] >= 0)
-    close(self->wakeup_pipe[0]);
-  if (self->wakeup_pipe[1] >= 0)
-    close(self->wakeup_pipe[1]);
-  self->wakeup_pipe[0] = -1;
-  self->wakeup_pipe[1] = -1;
-  return FALSE;
+  return _open_listen_socket(self);
 }
 
 static void
 _listener_stop(HTTPServerListener *self)
 {
   if (self->thread_started)
+    main_loop_threaded_worker_clear(&self->thread);
+
+  if (self->listen_fd >= 0)
     {
-      _request_stop(self);
-      main_loop_threaded_worker_clear(&self->thread);
+      close(self->listen_fd);
+      self->listen_fd = -1;
     }
+}
 
-  if (self->daemon)
-    MHD_stop_daemon(self->daemon);
+/* --- construction / registry ------------------------------------------- */
 
-  if (self->wakeup_pipe[0] >= 0)
-    close(self->wakeup_pipe[0]);
-  if (self->wakeup_pipe[1] >= 0)
-    close(self->wakeup_pipe[1]);
-  self->wakeup_pipe[0] = -1;
-  self->wakeup_pipe[1] = -1;
+static void
+_init_settings(void)
+{
+  static gboolean initialized = FALSE;
+  if (initialized)
+    return;
+
+  llhttp_settings_init(&http_settings);
+  http_settings.on_message_begin = _on_message_begin;
+  http_settings.on_url = _on_url;
+  http_settings.on_headers_complete = _on_headers_complete;
+  http_settings.on_body = _on_body;
+  http_settings.on_message_complete = _on_message_complete;
+  initialized = TRUE;
 }
 
 static HTTPServerListener *
@@ -476,14 +803,15 @@ _listener_new(const gchar *key, const gchar *bind_addr, gint port)
 {
   HTTPServerListener *self = g_new0(HTTPServerListener, 1);
 
+  _init_settings();
+
   self->user_count = 1;
   self->key = g_strdup(key);
   self->bind_addr = g_strdup(bind_addr ? bind_addr : "");
   self->port = port;
+  self->listen_fd = -1;
   g_mutex_init(&self->lock);
-  g_atomic_counter_set(&self->stop_requested, 0);
-  self->wakeup_pipe[0] = -1;
-  self->wakeup_pipe[1] = -1;
+  g_atomic_counter_set(&self->events_ready, 0);
   self->paths = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 
   main_loop_threaded_worker_init(&self->thread, MLW_THREADED_INPUT_WORKER, self);
@@ -495,7 +823,7 @@ _listener_new(const gchar *key, const gchar *bind_addr, gint port)
 static void
 _listener_free(HTTPServerListener *self)
 {
-  g_assert(self->wakeup_pipe[0] == -1);
+  g_assert(self->listen_fd == -1);
   g_hash_table_unref(self->paths);
   g_mutex_clear(&self->lock);
   g_free(self->key);

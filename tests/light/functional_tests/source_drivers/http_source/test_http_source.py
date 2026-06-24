@@ -88,6 +88,24 @@ def test_http_source_shares_a_port_between_paths(config, syslog_ng, port_allocat
     assert beta_destination.read_log() == "banana"
 
 
+def test_http_source_applies_backpressure_for_large_request(config, syslog_ng, port_allocator):
+    # a small flow-control window combined with a single large multi-line POST
+    # forces the connection to be suspended and retried repeatedly; all lines
+    # must still be delivered in order without deadlocking
+    http_source = config.create_http_source(
+        port=port_allocator(), path="/in", localip=LOOPBACK, log_iw_size=128,
+    )
+    file_destination = config.create_file_destination(file_name="output.log", template=r'"${MESSAGE}\n"')
+    config.create_logpath(statements=[http_source, file_destination])
+
+    syslog_ng.start(config)
+
+    messages = [f"message {i}" for i in range(2000)]
+    http_source.write_logs(messages)
+
+    assert file_destination.read_logs(2000) == messages
+
+
 def test_http_source_works_across_reload(config, syslog_ng, port_allocator):
     http_source = config.create_http_source(port=port_allocator(), path="/in", localip=LOOPBACK)
     file_destination = config.create_file_destination(file_name="output.log", template=r'"${MESSAGE}\n"')
