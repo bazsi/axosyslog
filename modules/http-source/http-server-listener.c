@@ -785,6 +785,23 @@ _init_settings(void)
   initialized = TRUE;
 }
 
+static void
+_init_watches(HTTPServerListener *self)
+{
+  IV_FD_INIT(&self->listen_fd);
+  self->listen_fd.fd = -1;
+  self->listen_fd.cookie = self;
+  self->listen_fd.handler_in = _listener_accept;
+
+  IV_EVENT_INIT(&self->wakeup_event);
+  self->wakeup_event.cookie = self;
+  self->wakeup_event.handler = _wakeup_event_handler;
+
+  IV_EVENT_INIT(&self->stop_event);
+  self->stop_event.cookie = self;
+  self->stop_event.handler = _stop_event_handler;
+}
+
 static HTTPServerListener *
 _listener_new(const gchar *key, const gchar *bind_addr, gint port)
 {
@@ -799,19 +816,7 @@ _listener_new(const gchar *key, const gchar *bind_addr, gint port)
   g_mutex_init(&self->lock);
   g_atomic_counter_set(&self->events_ready, 0);
   self->paths = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
-
-  IV_FD_INIT(&self->listen_fd);
-  self->listen_fd.fd = -1;
-  self->listen_fd.cookie = self;
-  self->listen_fd.handler_in = _listener_accept;
-
-  IV_EVENT_INIT(&self->wakeup_event);
-  self->wakeup_event.cookie = self;
-  self->wakeup_event.handler = _wakeup_event_handler;
-
-  IV_EVENT_INIT(&self->stop_event);
-  self->stop_event.cookie = self;
-  self->stop_event.handler = _stop_event_handler;
+  _init_watches(self);
 
   main_loop_threaded_worker_init(&self->thread, MLW_THREADED_INPUT_WORKER, self);
   self->thread.run = _listener_thread_run;
