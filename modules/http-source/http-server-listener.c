@@ -425,6 +425,12 @@ _conn_error_handler(void *cookie)
   _conn_close((HTTPServerConnection *) cookie);
 }
 
+static void
+_conn_start(HTTPServerConnection *self)
+{
+  iv_fd_register(&conn->iv_fd);
+}
+
 static HTTPServerConnection *
 _conn_new(HTTPServerListener *listener, gint fd, struct sockaddr *sa, socklen_t salen)
 {
@@ -448,7 +454,6 @@ _conn_new(HTTPServerListener *listener, gint fd, struct sockaddr *sa, socklen_t 
   conn->iv_fd.cookie = conn;
   conn->iv_fd.handler_in = _conn_read_handler;
   conn->iv_fd.handler_err = _conn_error_handler;
-  iv_fd_register(&conn->iv_fd);
 
   return conn;
 }
@@ -532,6 +537,7 @@ _listener_accept(void *cookie)
 
       HTTPServerConnection *conn = _conn_new(self, fd, (struct sockaddr *) &ss, slen);
       self->connections = g_list_prepend(self->connections, conn);
+      _conn_start(conn);
     }
 }
 
