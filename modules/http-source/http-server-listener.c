@@ -426,7 +426,7 @@ _conn_error_handler(void *cookie)
 }
 
 static void
-_conn_start(HTTPServerConnection *self)
+_conn_start(HTTPServerConnection *conn)
 {
   iv_fd_register(&conn->iv_fd);
 }
