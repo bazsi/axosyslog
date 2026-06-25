@@ -335,14 +335,23 @@ _conn_dispatch(HTTPServerConnection *conn)
 /* --- connection lifecycle ---------------------------------------------- */
 
 static void
+_conn_shutdown_socket(HTTPServerConnection *conn)
+{
+  if (iv_fd_registered(&conn->iv_fd))
+    iv_fd_unregister(&conn->iv_fd);
+  if (conn->fd >= 0)
+    {
+      close(conn->fd);
+      conn->fd = -1;
+    }
+}
+
+static void
 _conn_destroy(HTTPServerConnection *conn)
 {
   if (iv_task_registered(&conn->free_task))
     iv_task_unregister(&conn->free_task);
-  if (iv_fd_registered(&conn->iv_fd))
-    iv_fd_unregister(&conn->iv_fd);
-  if (conn->fd >= 0)
-    close(conn->fd);
+  _conn_shutdown_socket(conn);
 
   g_string_free(conn->url, TRUE);
   g_string_free(conn->body, TRUE);
@@ -366,13 +375,7 @@ _conn_close(HTTPServerConnection *conn)
     return;
   conn->closing = TRUE;
 
-  if (iv_fd_registered(&conn->iv_fd))
-    iv_fd_unregister(&conn->iv_fd);
-  if (conn->fd >= 0)
-    {
-      close(conn->fd);
-      conn->fd = -1;
-    }
+  _conn_shutdown_socket(conn);
 
   conn->listener->connections = g_list_remove(conn->listener->connections, conn);
   conn->listener->suspended = g_list_remove(conn->listener->suspended, conn);
