@@ -55,6 +55,7 @@
 %token KW_PATH
 %token KW_LOCALIP
 %token KW_MAX_REQUEST_SIZE
+%token KW_TIMEOUT
 
 %type <ptr> source_http
 
@@ -95,6 +96,10 @@ source_http_option
   | KW_MAX_REQUEST_SIZE '(' positive_integer ')'
     {
       http_sd_set_max_request_size(last_driver, $3);
+    }
+  | KW_TIMEOUT '(' nonnegative_integer ')'
+    {
+      http_sd_set_timeout(last_driver, $3);
     }
   | { last_source_options = http_sd_get_source_options(last_driver); } source_option
   | source_driver_option

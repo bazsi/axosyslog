@@ -71,7 +71,8 @@ typedef void (*HTTPServerRequestCompletion)(gpointer user_data, HTTPServerConnec
  * called from a request handler (on the listener thread).  wakeup() is
  * thread-safe and may be called from any thread.
  */
-HTTPServerListener *http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint port);
+HTTPServerListener *http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint port,
+                                                 gint connection_timeout);
 void http_server_listener_release(GlobalConfig *cfg, HTTPServerListener *self);
 
 /* start the listener thread (idempotent); call from post_config_init */

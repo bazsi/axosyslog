@@ -36,6 +36,7 @@ static CfgLexerKeyword http_source_keywords[] =
   { "localip",            KW_LOCALIP },
   { "path",               KW_PATH },
   { "max_request_size",   KW_MAX_REQUEST_SIZE },
+  { "timeout",            KW_TIMEOUT },
   { NULL }
 };
 

@@ -30,6 +30,7 @@
 #include "cfg.h"
 
 #define DEFAULT_MAX_REQUEST_SIZE (8 * 1024 * 1024)
+#define DEFAULT_TIMEOUT 30
 
 /*
  * A minimal LogSource: the listener thread (a registered mainloop worker
@@ -53,6 +54,7 @@ struct HTTPSourceDriver
   gchar *bind_addr;
   gchar *path;
   gsize max_request_size;
+  gint timeout;
 
   LogSourceOptions source_options;
   HTTPServerListener *listener;
@@ -203,7 +205,7 @@ _init(LogPipe *s)
   if (!log_pipe_init(&self->source->super.super))
     return FALSE;
 
-  self->listener = http_server_listener_acquire(cfg, self->bind_addr, self->port);
+  self->listener = http_server_listener_acquire(cfg, self->bind_addr, self->port, self->timeout);
   if (!self->listener)
     return FALSE;
 
@@ -297,6 +299,13 @@ http_sd_set_max_request_size(LogDriver *s, gsize size)
   self->max_request_size = size;
 }
 
+void
+http_sd_set_timeout(LogDriver *s, gint timeout)
+{
+  HTTPSourceDriver *self = (HTTPSourceDriver *) s;
+  self->timeout = timeout;
+}
+
 LogDriver *
 http_sd_new(GlobalConfig *cfg)
 {
@@ -305,6 +314,7 @@ http_sd_new(GlobalConfig *cfg)
 
   self->bind_addr = g_strdup("0.0.0.0");
   self->max_request_size = DEFAULT_MAX_REQUEST_SIZE;
+  self->timeout = DEFAULT_TIMEOUT;
   log_source_options_defaults(&self->source_options);
 
   self->super.super.super.init = _init;

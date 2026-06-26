@@ -20,6 +20,9 @@
 # COPYING for details.
 #
 #############################################################################
+import socket
+import time
+
 LOOPBACK = "127.0.0.1"
 
 
@@ -104,6 +107,29 @@ def test_http_source_applies_backpressure_for_large_request(config, syslog_ng, p
     http_source.write_logs(messages)
 
     assert file_destination.read_logs(2000) == messages
+
+
+def test_http_source_times_out_inactive_connection(config, syslog_ng, port_allocator):
+    port = port_allocator()
+    http_source = config.create_http_source(port=port, path="/in", localip=LOOPBACK, timeout=1)
+    file_destination = config.create_file_destination(file_name="output.log", template=r'"${MESSAGE}\n"')
+    config.create_logpath(statements=[http_source, file_destination])
+
+    syslog_ng.start(config)
+
+    # send headers but withhold the body, then stall: the server must close the
+    # inactive connection after timeout() seconds rather than holding it forever
+    sock = socket.create_connection((LOOPBACK, port), timeout=10)
+    try:
+        sock.sendall(b"POST /in HTTP/1.1\r\nContent-Length: 1000\r\n\r\n")
+        sock.settimeout(5)
+        start = time.monotonic()
+        data = sock.recv(4096)
+        elapsed = time.monotonic() - start
+        assert data == b""        # the server closed the connection (FIN)
+        assert elapsed >= 0.5     # it was the inactivity timer, not an immediate close
+    finally:
+        sock.close()
 
 
 def test_http_source_works_across_reload(config, syslog_ng, port_allocator):

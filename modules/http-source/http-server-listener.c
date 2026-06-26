@@ -26,6 +26,7 @@
 #include "messages.h"
 #include "atomic.h"
 #include "gsockaddr.h"
+#include "timeutils/misc.h"
 
 #include "llhttp.h"
 
@@ -56,6 +57,7 @@ struct HTTPServerListener
   gchar *bind_addr;
   gint port;
   gint user_count;
+  gint connection_timeout;      /* seconds an idle/partial connection may live, 0 disables */
 
   struct sockaddr_storage bind_sa;
   gboolean has_bind_sa;
@@ -80,6 +82,7 @@ struct HTTPServerConnection
   HTTPServerListener *listener;
   gint fd;
   struct iv_fd iv_fd;
+  struct iv_timer timer;
   struct iv_task free_task;
   GSockAddr *peer;
 
@@ -110,6 +113,40 @@ static void _conn_read_handler(void *cookie);
 static void _conn_write_handler(void *cookie);
 static void _conn_close(HTTPServerConnection *conn);
 static HTTPServerRequestResult _conn_dispatch(HTTPServerConnection *conn);
+
+/* --- per-connection inactivity timeout --------------------------------- */
+
+static void
+_conn_disarm_timer(HTTPServerConnection *conn)
+{
+  if (iv_timer_registered(&conn->timer))
+    iv_timer_unregister(&conn->timer);
+}
+
+/* (re)arm the inactivity timer; called whenever the client makes progress or
+ * the connection goes idle waiting for the next keep-alive request */
+static void
+_conn_touch_timer(HTTPServerConnection *conn)
+{
+  if (conn->listener->connection_timeout <= 0)
+    return;
+
+  _conn_disarm_timer(conn);
+  iv_validate_now();
+  conn->timer.expires = iv_now;
+  timespec_add_msec(&conn->timer.expires, (gint64) conn->listener->connection_timeout * 1000);
+  iv_timer_register(&conn->timer);
+}
+
+static void
+_conn_timeout(void *cookie)
+{
+  HTTPServerConnection *conn = (HTTPServerConnection *) cookie;
+  msg_debug("http(): closing inactive connection",
+            evt_tag_int("port", conn->listener->port),
+            evt_tag_int("timeout", conn->listener->connection_timeout));
+  _conn_close(conn);
+}
 
 /* --- path registry lookups --------------------------------------------- */
 
@@ -214,7 +251,11 @@ _conn_flush(HTTPServerConnection *conn)
   if (conn->should_close)
     _conn_close(conn);
   else
-    iv_fd_set_handler_in(&conn->iv_fd, _conn_read_handler);
+    {
+      /* keep-alive: wait for the next request, bounded by the inactivity timer */
+      iv_fd_set_handler_in(&conn->iv_fd, _conn_read_handler);
+      _conn_touch_timer(conn);
+    }
 }
 
 static void
@@ -334,9 +375,11 @@ _conn_dispatch(HTTPServerConnection *conn)
 
 /* --- connection lifecycle ---------------------------------------------- */
 
+/* release the connection's event-loop watches and close its fd */
 static void
 _conn_shutdown_socket(HTTPServerConnection *conn)
 {
+  _conn_disarm_timer(conn);
   if (iv_fd_registered(&conn->iv_fd))
     iv_fd_unregister(&conn->iv_fd);
   if (conn->fd >= 0)
@@ -407,6 +450,9 @@ _conn_read_handler(void *cookie)
       return;
     }
 
+  /* the client made progress: push back the inactivity deadline */
+  _conn_touch_timer(conn);
+
   enum llhttp_errno err = llhttp_execute(&conn->parser, buf, n);
 
   if (conn->closing)
@@ -432,6 +478,7 @@ static void
 _conn_start(HTTPServerConnection *conn)
 {
   iv_fd_register(&conn->iv_fd);
+  _conn_touch_timer(conn);
 }
 
 static HTTPServerConnection *
@@ -452,6 +499,10 @@ _conn_new(HTTPServerListener *listener, gint fd, struct sockaddr *sa, socklen_t 
   conn->free_task.cookie = conn;
   conn->free_task.handler = _conn_free_task;
 
+  IV_TIMER_INIT(&conn->timer);
+  conn->timer.cookie = conn;
+  conn->timer.handler = _conn_timeout;
+
   IV_FD_INIT(&conn->iv_fd);
   conn->iv_fd.fd = fd;
   conn->iv_fd.cookie = conn;
@@ -471,8 +522,10 @@ http_server_listener_suspend_connection(HTTPServerConnection *conn)
       conn->suspended = TRUE;
       conn->listener->suspended = g_list_prepend(conn->listener->suspended, conn);
     }
-  /* stop reading this connection until the window reopens */
+  /* stop reading this connection until the window reopens; the stall is on our
+   * side now, so don't hold the client to the inactivity deadline */
   iv_fd_set_handler_in(&conn->iv_fd, NULL);
+  _conn_disarm_timer(conn);
 }
 
 static void
@@ -812,7 +865,7 @@ _init_watches(HTTPServerListener *self)
 }
 
 static HTTPServerListener *
-_listener_new(const gchar *key, const gchar *bind_addr, gint port)
+_listener_new(const gchar *key, const gchar *bind_addr, gint port, gint connection_timeout)
 {
   HTTPServerListener *self = g_new0(HTTPServerListener, 1);
 
@@ -822,6 +875,7 @@ _listener_new(const gchar *key, const gchar *bind_addr, gint port)
   self->key = g_strdup(key);
   self->bind_addr = g_strdup(bind_addr ? bind_addr : "");
   self->port = port;
+  self->connection_timeout = connection_timeout;
   g_mutex_init(&self->lock);
   g_atomic_counter_set(&self->events_ready, 0);
   self->paths = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
@@ -863,7 +917,7 @@ _get_registry(GlobalConfig *cfg)
 }
 
 HTTPServerListener *
-http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint port)
+http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint port, gint connection_timeout)
 {
   gchar key[128];
   GHashTable *registry = _get_registry(cfg);
@@ -873,11 +927,15 @@ http_server_listener_acquire(GlobalConfig *cfg, const gchar *bind_addr, gint por
   HTTPServerListener *listener = g_hash_table_lookup(registry, key);
   if (listener)
     {
+      if (listener->connection_timeout != connection_timeout)
+        msg_warning("http(): sources sharing a port disagree on timeout(), keeping the first value",
+                    evt_tag_int("port", port),
+                    evt_tag_int("timeout", listener->connection_timeout));
       listener->user_count++;
       return listener;
     }
 
-  listener = _listener_new(key, bind_addr, port);
+  listener = _listener_new(key, bind_addr, port, connection_timeout);
   if (_listener_start(listener))
     g_hash_table_insert(registry, listener->key, listener);
   else
