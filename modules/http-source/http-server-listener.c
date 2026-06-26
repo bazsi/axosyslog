@@ -732,12 +732,11 @@ static gboolean
 _open_listen_socket(HTTPServerListener *self)
 {
   const gchar *bind_addr = self->bind_addr;
-  gboolean wildcard = !bind_addr || !bind_addr[0] ||
-                      strcmp(bind_addr, "0.0.0.0") == 0 || strcmp(bind_addr, "::") == 0;
 
-  if (wildcard)
+  if (!bind_addr || !bind_addr[0])
     {
-      /* prefer a dual-stack IPv6 wildcard, fall back to IPv4-only */
+      /* no bind address given: prefer a dual-stack IPv6 wildcard, fall back to
+       * IPv4-only.  An explicit "0.0.0.0" or "::" is honoured as-is below. */
       GSockAddr *addr6 = g_sockaddr_inet6_new("::", (guint16) self->port);
       if (addr6)
         {

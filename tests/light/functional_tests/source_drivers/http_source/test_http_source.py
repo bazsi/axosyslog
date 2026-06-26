@@ -109,6 +109,19 @@ def test_http_source_applies_backpressure_for_large_request(config, syslog_ng, p
     assert file_destination.read_logs(2000) == messages
 
 
+def test_http_source_binds_wildcard_by_default(config, syslog_ng, port_allocator):
+    # no localip(): the driver binds a (dual-stack) wildcard, reachable via localhost
+    http_source = config.create_http_source(port=port_allocator(), path="/in")
+    file_destination = config.create_file_destination(file_name="output.log", template=r'"${MESSAGE}\n"')
+    config.create_logpath(statements=[http_source, file_destination])
+
+    syslog_ng.start(config)
+
+    http_source.write_log("wildcard")
+
+    assert file_destination.read_log() == "wildcard"
+
+
 def test_http_source_times_out_inactive_connection(config, syslog_ng, port_allocator):
     port = port_allocator()
     http_source = config.create_http_source(port=port, path="/in", localip=LOOPBACK, timeout=1)

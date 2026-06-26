@@ -312,7 +312,7 @@ http_sd_new(GlobalConfig *cfg)
   HTTPSourceDriver *self = g_new0(HTTPSourceDriver, 1);
   log_src_driver_init_instance(&self->super, cfg);
 
-  self->bind_addr = g_strdup("0.0.0.0");
+  /* bind_addr stays NULL by default: bind to a dual-stack wildcard */
   self->max_request_size = DEFAULT_MAX_REQUEST_SIZE;
   self->timeout = DEFAULT_TIMEOUT;
   log_source_options_defaults(&self->source_options);
