@@ -26,6 +26,7 @@
 #include "messages.h"
 #include "atomic.h"
 #include "gsockaddr.h"
+#include "gsocket.h"
 #include "timeutils/misc.h"
 
 #include "llhttp.h"
@@ -39,7 +40,6 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
 
 #define HTTP_READ_BUFFER_SIZE 16384
 
@@ -58,9 +58,6 @@ struct HTTPServerListener
   gint port;
   gint user_count;
   gint connection_timeout;      /* seconds an idle/partial connection may live, 0 disables */
-
-  struct sockaddr_storage bind_sa;
-  gboolean has_bind_sa;
 
   GMutex lock;
   GHashTable *paths;            /* path (owned gchar *) -> PathRegistration * */
@@ -481,13 +478,14 @@ _conn_start(HTTPServerConnection *conn)
   _conn_touch_timer(conn);
 }
 
+/* takes ownership of the peer GSockAddr reference */
 static HTTPServerConnection *
-_conn_new(HTTPServerListener *listener, gint fd, struct sockaddr *sa, socklen_t salen)
+_conn_new(HTTPServerListener *listener, gint fd, GSockAddr *peer)
 {
   HTTPServerConnection *conn = g_new0(HTTPServerConnection, 1);
   conn->listener = listener;
   conn->fd = fd;
-  conn->peer = g_sockaddr_new(sa, salen);
+  conn->peer = peer;
   conn->url = g_string_sized_new(64);
   conn->body = g_string_sized_new(1024);
   conn->write_buf = g_string_sized_new(128);
@@ -574,15 +572,13 @@ _listener_accept(void *cookie)
 
   for (;;)
     {
-      struct sockaddr_storage ss;
-      socklen_t slen = sizeof(ss);
-      gint fd = accept(self->listen_fd.fd, (struct sockaddr *) &ss, &slen);
-      if (fd < 0)
+      gint fd;
+      GSockAddr *peer = NULL;
+      GIOStatus status = g_accept(self->listen_fd.fd, &fd, &peer);
+      if (status == G_IO_STATUS_AGAIN)
+        break;
+      if (status != G_IO_STATUS_NORMAL)
         {
-          if (errno == EINTR)
-            continue;
-          if (errno == EAGAIN || errno == EWOULDBLOCK)
-            break;
           msg_error("http(): failed to accept connection",
                     evt_tag_int("port", self->port), evt_tag_error("error"));
           break;
@@ -591,7 +587,7 @@ _listener_accept(void *cookie)
       int flags = fcntl(fd, F_GETFL, 0);
       fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
-      HTTPServerConnection *conn = _conn_new(self, fd, (struct sockaddr *) &ss, slen);
+      HTTPServerConnection *conn = _conn_new(self, fd, peer);
       self->connections = g_list_prepend(self->connections, conn);
       _conn_start(conn);
     }
@@ -700,45 +696,13 @@ http_server_listener_unregister_path(HTTPServerListener *self, const gchar *path
 
 /* --- listen socket ----------------------------------------------------- */
 
-static gboolean
-_resolve_bind_addr(HTTPServerListener *self, const gchar *bind_addr)
-{
-  if (!bind_addr || !bind_addr[0] ||
-      strcmp(bind_addr, "0.0.0.0") == 0 || strcmp(bind_addr, "::") == 0)
-    {
-      self->has_bind_sa = FALSE;
-      return TRUE;
-    }
-
-  memset(&self->bind_sa, 0, sizeof(self->bind_sa));
-
-  struct sockaddr_in *sin = (struct sockaddr_in *) &self->bind_sa;
-  if (inet_pton(AF_INET, bind_addr, &sin->sin_addr) == 1)
-    {
-      sin->sin_family = AF_INET;
-      sin->sin_port = htons((guint16) self->port);
-      self->has_bind_sa = TRUE;
-      return TRUE;
-    }
-
-  struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *) &self->bind_sa;
-  if (inet_pton(AF_INET6, bind_addr, &sin6->sin6_addr) == 1)
-    {
-      sin6->sin6_family = AF_INET6;
-      sin6->sin6_port = htons((guint16) self->port);
-      self->has_bind_sa = TRUE;
-      return TRUE;
-    }
-
-  msg_error("http(): could not parse bind address, expected a numeric IPv4 or IPv6 address",
-            evt_tag_str("ip", bind_addr));
-  return FALSE;
-}
-
+/* create a non-blocking, bound, listening socket for the given address */
 static gint
-_open_socket(int family, const struct sockaddr *sa, socklen_t salen, gboolean v6only_off)
+_open_socket(GSockAddr *addr, gboolean v6only_off)
 {
-  gint fd = socket(family, SOCK_STREAM, 0);
+  struct sockaddr *sa = g_sockaddr_get_sa(addr);
+
+  gint fd = socket(sa->sa_family, SOCK_STREAM, 0);
   if (fd < 0)
     return -1;
 
@@ -747,7 +711,7 @@ _open_socket(int family, const struct sockaddr *sa, socklen_t salen, gboolean v6
 #ifdef SO_REUSEPORT
   setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on));
 #endif
-  if (family == AF_INET6)
+  if (sa->sa_family == AF_INET6)
     {
       int v6only = v6only_off ? 0 : 1;
       setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
@@ -756,7 +720,7 @@ _open_socket(int family, const struct sockaddr *sa, socklen_t salen, gboolean v6
   int flags = fcntl(fd, F_GETFL, 0);
   fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
-  if (bind(fd, sa, salen) < 0 || listen(fd, SOMAXCONN) < 0)
+  if (g_bind(fd, addr) != G_IO_STATUS_NORMAL || listen(fd, SOMAXCONN) < 0)
     {
       close(fd);
       return -1;
@@ -767,34 +731,40 @@ _open_socket(int family, const struct sockaddr *sa, socklen_t salen, gboolean v6
 static gboolean
 _open_listen_socket(HTTPServerListener *self)
 {
-  if (self->has_bind_sa)
+  const gchar *bind_addr = self->bind_addr;
+  gboolean wildcard = !bind_addr || !bind_addr[0] ||
+                      strcmp(bind_addr, "0.0.0.0") == 0 || strcmp(bind_addr, "::") == 0;
+
+  if (wildcard)
     {
-      socklen_t salen = (self->bind_sa.ss_family == AF_INET6)
-                        ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
-      self->listen_fd.fd = _open_socket(self->bind_sa.ss_family,
-                                        (struct sockaddr *) &self->bind_sa, salen, FALSE);
-    }
-  else
-    {
-      /* wildcard: prefer a dual-stack IPv6 socket, fall back to IPv4-only */
-      struct sockaddr_in6 sin6;
-      memset(&sin6, 0, sizeof(sin6));
-      sin6.sin6_family = AF_INET6;
-      sin6.sin6_addr = in6addr_any;
-      sin6.sin6_port = htons((guint16) self->port);
-      self->listen_fd.fd = _open_socket(AF_INET6, (struct sockaddr *) &sin6, sizeof(sin6), TRUE);
+      /* prefer a dual-stack IPv6 wildcard, fall back to IPv4-only */
+      GSockAddr *addr6 = g_sockaddr_inet6_new("::", (guint16) self->port);
+      if (addr6)
+        {
+          self->listen_fd.fd = _open_socket(addr6, TRUE);
+          g_sockaddr_unref(addr6);
+        }
 
       if (self->listen_fd.fd < 0)
         {
           msg_debug("http(): could not open a dual-stack listener, falling back to IPv4",
                     evt_tag_int("port", self->port));
-          struct sockaddr_in sin;
-          memset(&sin, 0, sizeof(sin));
-          sin.sin_family = AF_INET;
-          sin.sin_addr.s_addr = htonl(INADDR_ANY);
-          sin.sin_port = htons((guint16) self->port);
-          self->listen_fd.fd = _open_socket(AF_INET, (struct sockaddr *) &sin, sizeof(sin), FALSE);
+          GSockAddr *addr4 = g_sockaddr_inet_new("0.0.0.0", (guint16) self->port);
+          self->listen_fd.fd = _open_socket(addr4, FALSE);
+          g_sockaddr_unref(addr4);
         }
+    }
+  else
+    {
+      GSockAddr *addr = g_sockaddr_inet_or_inet6_new(bind_addr, (guint16) self->port);
+      if (!addr)
+        {
+          msg_error("http(): could not parse bind address, expected a numeric IPv4 or IPv6 address",
+                    evt_tag_str("ip", bind_addr));
+          return FALSE;
+        }
+      self->listen_fd.fd = _open_socket(addr, FALSE);
+      g_sockaddr_unref(addr);
     }
 
   if (self->listen_fd.fd < 0)
@@ -810,9 +780,6 @@ _open_listen_socket(HTTPServerListener *self)
 static gboolean
 _listener_start(HTTPServerListener *self)
 {
-  if (!_resolve_bind_addr(self, self->bind_addr))
-    return FALSE;
-
   return _open_listen_socket(self);
 }
 
