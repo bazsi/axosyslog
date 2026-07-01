@@ -49,6 +49,7 @@
 
 typedef struct _PathRegistration
 {
+  HTTPServerRequestValidator validator;
   HTTPServerRequestHandler handler;
   HTTPServerRequestCompletion completion;
   gpointer user_data;
@@ -98,15 +99,24 @@ struct HTTPServerConnection
   gchar *path;                  /* request path with the query string stripped */
   guint resp_status;            /* non-zero: an error response to send instead of dispatching */
 
+  /* request headers, captured for validators/handlers to inspect */
+  GHashTable *headers;          /* lowercased header name -> value (both owned) */
+  GString *header_field;        /* llhttp streams the current header name here */
+  GString *header_value;        /* ... and its value here */
+  gboolean header_reading_value;
+
   /* dispatch */
   gsize max_request_size;
   gsize offset;                 /* request handler progress into body */
+  gboolean validated;           /* the per-request validator has already run */
   gboolean suspended;
   gboolean keep_alive;
 
   /* response */
   GString *write_buf;
   gsize write_offset;
+  guint custom_status;          /* non-zero: response status set via _respond() */
+  GString *custom_body;         /* response body set via _respond() */
   gboolean should_close;
   gboolean closing;
 };
@@ -178,6 +188,10 @@ _reason_phrase(guint status)
       return "OK";
     case 400:
       return "Bad Request";
+    case 401:
+      return "Unauthorized";
+    case 403:
+      return "Forbidden";
     case 404:
       return "Not Found";
     case 405:
@@ -194,6 +208,10 @@ _response_body(guint status)
 {
   switch (status)
     {
+    case 401:
+      return "authentication required\n";
+    case 403:
+      return "forbidden\n";
     case 404:
       return "no source registered for this path\n";
     case 405:
@@ -207,10 +225,10 @@ _response_body(guint status)
     }
 }
 
+/* format a response with an explicit body into the write buffer */
 static void
-_conn_queue_response(HTTPServerConnection *conn, guint status)
+_conn_queue_response_body(HTTPServerConnection *conn, guint status, const gchar *body)
 {
-  const gchar *body = _response_body(status);
   gboolean keep_alive = conn->keep_alive && status == 200;
 
   g_string_append_printf(conn->write_buf,
@@ -224,6 +242,17 @@ _conn_queue_response(HTTPServerConnection *conn, guint status)
 
   if (!keep_alive)
     conn->should_close = TRUE;
+}
+
+/* queue the canonical (or _respond()-overridden) response for the status */
+static void
+_conn_queue_response(HTTPServerConnection *conn, guint status)
+{
+  if (conn->custom_status)
+    _conn_queue_response_body(conn, conn->custom_status,
+                              conn->custom_body ? conn->custom_body->str : "");
+  else
+    _conn_queue_response_body(conn, status, _response_body(status));
 }
 
 /*
@@ -315,6 +344,52 @@ _on_message_begin(llhttp_t *parser)
   conn->resp_status = 0;
   conn->offset = 0;
   conn->max_request_size = 0;
+
+  g_hash_table_remove_all(conn->headers);
+  g_string_truncate(conn->header_field, 0);
+  g_string_truncate(conn->header_value, 0);
+  conn->header_reading_value = FALSE;
+  conn->validated = FALSE;
+  conn->custom_status = 0;
+  g_string_truncate(conn->custom_body, 0);
+  return 0;
+}
+
+/* commit the header name/value pair accumulated so far into the header table */
+static void
+_conn_flush_header(HTTPServerConnection *conn)
+{
+  if (conn->header_field->len == 0)
+    return;
+
+  g_hash_table_insert(conn->headers,
+                      g_ascii_strdown(conn->header_field->str, conn->header_field->len),
+                      g_strdup(conn->header_value->str));
+  g_string_truncate(conn->header_field, 0);
+  g_string_truncate(conn->header_value, 0);
+}
+
+static int
+_on_header_field(llhttp_t *parser, const char *at, size_t length)
+{
+  HTTPServerConnection *conn = parser->data;
+
+  /* a new field name after a value means the previous pair is complete */
+  if (conn->header_reading_value)
+    {
+      _conn_flush_header(conn);
+      conn->header_reading_value = FALSE;
+    }
+  g_string_append_len(conn->header_field, at, length);
+  return 0;
+}
+
+static int
+_on_header_value(llhttp_t *parser, const char *at, size_t length)
+{
+  HTTPServerConnection *conn = parser->data;
+  conn->header_reading_value = TRUE;
+  g_string_append_len(conn->header_value, at, length);
   return 0;
 }
 
@@ -331,6 +406,8 @@ _on_headers_complete(llhttp_t *parser)
 {
   HTTPServerConnection *conn = parser->data;
   PathRegistration reg;
+
+  _conn_flush_header(conn);
 
   /* strip the query string: routing matches the path only */
   const gchar *q = strchr(conn->url->str, '?');
@@ -401,6 +478,18 @@ _conn_dispatch(HTTPServerConnection *conn)
       return HTTP_SERVER_REQUEST_COMPLETE;
     }
 
+  /* run the validator once, before the body is handed to the request handler;
+   * a rejection sends the (possibly overridden) response and skips the body */
+  if (!conn->validated)
+    {
+      conn->validated = TRUE;
+      if (reg.validator && !reg.validator(reg.user_data, conn))
+        {
+          _conn_queue_response(conn, 403);
+          return HTTP_SERVER_REQUEST_COMPLETE;
+        }
+    }
+
   HTTPServerRequestResult result =
     reg.handler(reg.user_data, conn, conn->body->str, conn->body->len, &conn->offset, conn->peer);
 
@@ -438,6 +527,10 @@ _conn_destroy(HTTPServerConnection *conn)
   g_string_free(conn->url, TRUE);
   g_string_free(conn->body, TRUE);
   g_string_free(conn->write_buf, TRUE);
+  g_hash_table_unref(conn->headers);
+  g_string_free(conn->header_field, TRUE);
+  g_string_free(conn->header_value, TRUE);
+  g_string_free(conn->custom_body, TRUE);
   g_free(conn->path);
   g_sockaddr_unref(conn->peer);
   g_free(conn);
@@ -582,6 +675,10 @@ _conn_new(HTTPServerListener *listener, gint fd, GSockAddr *peer)
   conn->url = g_string_sized_new(64);
   conn->body = g_string_sized_new(1024);
   conn->write_buf = g_string_sized_new(128);
+  conn->headers = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+  conn->header_field = g_string_sized_new(32);
+  conn->header_value = g_string_sized_new(64);
+  conn->custom_body = g_string_sized_new(0);
 
   llhttp_init(&conn->parser, HTTP_REQUEST, &http_settings);
   conn->parser.data = conn;
@@ -755,10 +852,54 @@ http_server_listener_start(HTTPServerListener *self)
   return main_loop_threaded_worker_start(&self->thread);
 }
 
+/* --- per-request accessors --------------------------------------------- */
+
+const gchar *
+http_server_connection_get_method(HTTPServerConnection *conn)
+{
+  llhttp_method_t method = llhttp_get_method(&conn->parser);
+  return llhttp_method_name(method);
+}
+
+const gchar *
+http_server_connection_get_path(HTTPServerConnection *conn)
+{
+  return conn->path;
+}
+
+GSockAddr *
+http_server_connection_get_peer(HTTPServerConnection *conn)
+{
+  return conn->peer;
+}
+
+const gchar *
+http_server_connection_get_header(HTTPServerConnection *conn, const gchar *name)
+{
+  gchar *key = g_ascii_strdown(name, -1);
+  const gchar *value = g_hash_table_lookup(conn->headers, key);
+  g_free(key);
+  return value;
+}
+
+GHashTable *
+http_server_connection_get_headers(HTTPServerConnection *conn)
+{
+  return conn->headers;
+}
+
+void
+http_server_connection_respond(HTTPServerConnection *conn, guint status, const gchar *body)
+{
+  conn->custom_status = status;
+  g_string_assign(conn->custom_body, body ? body : "");
+}
+
 /* --- path registration ------------------------------------------------- */
 
 gboolean
 http_server_listener_register_path(HTTPServerListener *self, const gchar *path,
+                                   HTTPServerRequestValidator validator,
                                    HTTPServerRequestHandler handler,
                                    HTTPServerRequestCompletion completion,
                                    gpointer user_data, gsize max_request_size)
@@ -771,6 +912,7 @@ http_server_listener_register_path(HTTPServerListener *self, const gchar *path,
                 evt_tag_str("path", path), evt_tag_int("port", self->port));
 
   PathRegistration *reg = g_new0(PathRegistration, 1);
+  reg->validator = validator;
   reg->handler = handler;
   reg->completion = completion;
   reg->user_data = user_data;
@@ -920,6 +1062,8 @@ _init_settings(void)
   llhttp_settings_init(&http_settings);
   http_settings.on_message_begin = _on_message_begin;
   http_settings.on_url = _on_url;
+  http_settings.on_header_field = _on_header_field;
+  http_settings.on_header_value = _on_header_value;
   http_settings.on_headers_complete = _on_headers_complete;
   http_settings.on_body = _on_body;
   http_settings.on_message_complete = _on_message_complete;

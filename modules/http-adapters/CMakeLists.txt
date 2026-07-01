@@ -1,7 +1,7 @@
-# only compile this if the HTTP module (masquerading as the CURL module)
-# is enabled
+# the response adapters serve the HTTP (CURL) destination and the request
+# authenticators serve the http-source module; build if either is enabled
 
-if (NOT ENABLE_CURL)
+if (NOT ENABLE_CURL AND NOT ENABLE_HTTP_SOURCE)
   return ()
 endif ()
 
@@ -13,6 +13,8 @@ set(HTTP_ADAPTERS_SOURCES
     http-adapters-plugin.c
     splunk-adapter.c
     splunk-adapter.h
+    splunk-hec-auth.c
+    splunk-hec-auth.h
 )
 
 add_module(

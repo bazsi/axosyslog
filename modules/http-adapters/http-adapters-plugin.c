@@ -31,6 +31,11 @@ static Plugin http_adapters_plugins[] =
     .name = "response_adapter",
     .parser = &http_adapters_parser,
   },
+  {
+    .type = LL_CONTEXT_INNER_SRC,
+    .name = "hec_auth",
+    .parser = &http_adapters_parser,
+  },
 };
 
 gboolean

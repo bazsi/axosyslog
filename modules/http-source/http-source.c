@@ -22,6 +22,7 @@
 
 #include "http-source.h"
 #include "http-server-listener.h"
+#include "http-source-signals.h"
 #include "logsource.h"
 #include "mainloop-worker.h"
 #include "messages.h"
@@ -44,6 +45,7 @@ typedef struct _HTTPSource
 {
   LogSource super;
   HTTPServerListener *listener;
+  SignalSlotConnector *request_connector;   /* the owning driver's connector */
 } HTTPSource;
 
 struct HTTPSourceDriver
@@ -126,6 +128,43 @@ _handle_request_body(gpointer user_data, HTTPServerConnection *connection,
 
   main_loop_worker_invoke_batch_callbacks();
   return HTTP_SERVER_REQUEST_COMPLETE;
+}
+
+/*
+ * HTTPServerRequestValidator: runs on the listener thread, once per request,
+ * before the body is ingested.  Emits signal_http_source_request so plugins
+ * (e.g. authenticators) can inspect the request and reject it, overriding the
+ * response.  Returns FALSE to reject.
+ */
+static gboolean
+_validate_request(gpointer user_data, HTTPServerConnection *connection)
+{
+  HTTPSource *self = (HTTPSource *) user_data;
+
+  if (!self->request_connector)
+    return TRUE;
+
+  HTTPSourceRequestSignalData data =
+  {
+    .method = http_server_connection_get_method(connection),
+    .path = http_server_connection_get_path(connection),
+    .headers = http_server_connection_get_headers(connection),
+    .peer = http_server_connection_get_peer(connection),
+    .rejected = FALSE,
+    .response_status = 0,
+    .response_body = NULL,
+  };
+
+  EMIT(self->request_connector, signal_http_source_request, &data);
+
+  if (data.rejected)
+    {
+      http_server_connection_respond(connection,
+                                     data.response_status ? data.response_status : 401,
+                                     data.response_body ? data.response_body : "");
+      return FALSE;
+    }
+  return TRUE;
 }
 
 static HTTPSource *
@@ -221,8 +260,12 @@ _init(LogPipe *s)
    * listener it is registered on */
   self->source->listener = self->listener;
 
+  /* the request validator emits signals on this driver's connector, which the
+   * driver's plugins (e.g. authenticators) have connected their slots to */
+  self->source->request_connector = self->super.super.signal_slot_connector;
+
   http_server_listener_register_path(self->listener, self->path,
-                                     _handle_request_body, NULL, self->source,
+                                     _validate_request, _handle_request_body, NULL, self->source,
                                      self->max_request_size);
   return TRUE;
 }

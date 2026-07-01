@@ -22,6 +22,7 @@
 
 %code top {
 #include "splunk-adapter.h"
+#include "splunk-hec-auth.h"
 
 }
 
@@ -34,6 +35,8 @@
 #include "plugin.h"
 
 #include <string.h>
+
+static LogDriverPlugin *last_hec_auth;
 
 }
 
@@ -48,9 +51,12 @@
 %parse-param {gpointer arg}
 
 %token KW_RESPONSE_ADAPTER
+%token KW_HEC_AUTH
+%token KW_TOKEN
 
 %type   <ptr> driver
 %type   <ptr> http_response_adapter
+%type   <ptr> http_source_authenticator
 
 /* INCLUDE_DECLS */
 
@@ -68,6 +74,7 @@ start
 
 driver
     : LL_CONTEXT_INNER_DEST http_response_adapter      { $$ = $2; }
+    | LL_CONTEXT_INNER_SRC http_source_authenticator   { $$ = $2; }
     ;
 
 http_response_adapter
@@ -76,6 +83,30 @@ http_response_adapter
         CHECK_ERROR(strcmp($3, "splunk") == 0, @3, "Unknown response adapter \"%s\"", $3);
         $$ = splunk_adapter_new();
 	free($3);
+      }
+    ;
+
+http_source_authenticator
+    : KW_HEC_AUTH '('
+      {
+        last_hec_auth = splunk_hec_auth_new();
+      }
+      hec_auth_options ')'
+      {
+        $$ = last_hec_auth;
+      }
+    ;
+
+hec_auth_options
+    : hec_auth_option hec_auth_options
+    |
+    ;
+
+hec_auth_option
+    : KW_TOKEN '(' string ')'
+      {
+        splunk_hec_auth_add_token(last_hec_auth, $3);
+        free($3);
       }
     ;
 

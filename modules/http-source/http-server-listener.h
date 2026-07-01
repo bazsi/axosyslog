@@ -52,8 +52,40 @@ typedef HTTPServerRequestResult (*HTTPServerRequestHandler)(gpointer user_data,
                                                             const gchar *body, gsize body_len, gsize *offset,
                                                             GSockAddr *peer);
 
+/*
+ * Invoked on the listener thread once a request has been fully received, before
+ * the body is dispatched to the request handler (exactly once per request).
+ * Return TRUE to let processing continue, or FALSE to reject the request: in
+ * that case the response set with http_server_connection_respond() is sent
+ * (defaulting to 403 if none was set) and the body handler is not called.  This
+ * is the hook used to implement authentication.  May be NULL.
+ */
+typedef gboolean (*HTTPServerRequestValidator)(gpointer user_data, HTTPServerConnection *connection);
+
 /* Invoked when a request terminates (whether completed or aborted). May be NULL. */
 typedef void (*HTTPServerRequestCompletion)(gpointer user_data, HTTPServerConnection *connection);
+
+/* --- per-request accessors, callable from a validator or request handler --- */
+
+/* the request method ("POST", ...) and the routed path (query string stripped) */
+const gchar *http_server_connection_get_method(HTTPServerConnection *connection);
+const gchar *http_server_connection_get_path(HTTPServerConnection *connection);
+
+/* the peer address (borrowed), or NULL */
+GSockAddr *http_server_connection_get_peer(HTTPServerConnection *connection);
+
+/* look up a request header by name (case-insensitive), or NULL if absent */
+const gchar *http_server_connection_get_header(HTTPServerConnection *connection, const gchar *name);
+
+/* the full request header set, keyed by lowercased header name -> value */
+GHashTable *http_server_connection_get_headers(HTTPServerConnection *connection);
+
+/*
+ * Override the response sent for this request with the given status and body.
+ * The body is copied.  Typically called from a validator that rejects the
+ * request, but a request handler may also use it to customise the 2xx response.
+ */
+void http_server_connection_respond(HTTPServerConnection *connection, guint status, const gchar *body);
 
 /*
  * A shared HTTP listener, keyed by (config, bind address, port).  Multiple
@@ -89,6 +121,7 @@ void http_server_listener_release(GlobalConfig *cfg, HTTPServerListener *self);
 gboolean http_server_listener_start(HTTPServerListener *self);
 
 gboolean http_server_listener_register_path(HTTPServerListener *self, const gchar *path,
+                                            HTTPServerRequestValidator validator,
                                             HTTPServerRequestHandler handler,
                                             HTTPServerRequestCompletion completion,
                                             gpointer user_data, gsize max_request_size);

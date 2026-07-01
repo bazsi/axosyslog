@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Balazs Scheidler <balazs.scheidler@axoflow.com>
+ * Copyright (c) 2026 Axoflow
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by
@@ -20,31 +20,19 @@
  *
  */
 
+#ifndef SPLUNK_HEC_AUTH_H_INCLUDED
+#define SPLUNK_HEC_AUTH_H_INCLUDED 1
+
 #include "driver.h"
-#include "cfg-parser.h"
-#include "http-adapters-grammar.h"
 
-extern int http_adapters_debug;
+/*
+ * A LogDriverPlugin for the http() source that authenticates incoming requests
+ * the way a Splunk HTTP Event Collector does: the client must present an
+ * "Authorization: Splunk <token>" (or "Bearer <token>") header carrying one of
+ * the configured tokens.  Requests without a valid token are rejected with a
+ * Splunk-style 401 JSON error.
+ */
+LogDriverPlugin *splunk_hec_auth_new(void);
+void splunk_hec_auth_add_token(LogDriverPlugin *self, const gchar *token);
 
-int http_adapters_parse(CfgLexer *lexer, LogDriver **instance, gpointer arg);
-
-static CfgLexerKeyword http_adapters_keywords[] =
-{
-  { "response_adapter", KW_RESPONSE_ADAPTER },
-  { "hec_auth",         KW_HEC_AUTH },
-  { "token",            KW_TOKEN },
-  { NULL }
-};
-
-CfgParser http_adapters_parser =
-{
-#if SYSLOG_NG_ENABLE_DEBUG
-  .debug_flag = &http_adapters_debug,
 #endif
-  .name = "http-adapters",
-  .keywords = http_adapters_keywords,
-  .parse = (gint (*)(CfgLexer *, gpointer *, gpointer)) http_adapters_parse,
-  .cleanup = (void (*)(gpointer)) log_pipe_unref,
-};
-
-CFG_PARSER_IMPLEMENT_LEXER_BINDING(http_adapters_, HTTP_ADAPTERS_, LogDriver **)
