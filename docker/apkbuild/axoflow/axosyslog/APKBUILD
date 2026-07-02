@@ -11,13 +11,14 @@ pkgdesc="Next generation logging daemon"
 url="https://axoflow.com/docs/axosyslog/"
 arch="all"
 license="GPL-3.0-or-later"
-options="!check !strip" # unit tests require https://github.com/Snaipe/Criterion with deps
+options="!strip" # unit tests require https://github.com/Snaipe/Criterion with deps
 makedepends="
 	apache-arrow-dev
 	bison
 	bpftool
 	clang
 	curl-dev
+	criterion-dev
 	file
 	flex
 	geoip-dev
@@ -120,6 +121,10 @@ dev() {
 
 	_submv usr/share/syslog-ng/tools \
 		usr/share/syslog-ng/xsd
+}
+
+check() {
+	make -j8 check || cat ./test-suite.log && false
 }
 
 _submv() {
