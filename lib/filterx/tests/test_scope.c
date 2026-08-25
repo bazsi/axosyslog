@@ -244,24 +244,7 @@ Test(filterx_scope, test_scope_dup_flattens_parent_chain_into_an_independent_cop
   cr_assert(state.msg_tied_seen);
   cr_assert(state.floating_seen);
 
-  /* filterx_scope_dup() may have produced a pair of scopes (see its
-   * comment): the "own" scope returned as `dup`, optionally parented onto
-   * a frozen, flattened ancestor scope. Each owns its own layout and must
-   * be freed individually -- filterx_scope_free() does not recurse into
-   * parent_scope, since that pointer is a live, externally owned link in
-   * the normal (non-dup'd) case. See filterx_eval_context_free_dup() for
-   * the same dance done at the FilterXEvalContext level. */
-  FilterXScope *dup_ancestor_scope = dup->parent_scope;
-  FilterXScopeVariableLayout *dup_layout = dup->layout;
-  filterx_scope_free(dup);
-  filterx_scope_variable_layout_free(dup_layout);
-
-  if (dup_ancestor_scope)
-    {
-      FilterXScopeVariableLayout *dup_ancestor_layout = dup_ancestor_scope->layout;
-      filterx_scope_free(dup_ancestor_scope);
-      filterx_scope_variable_layout_free(dup_ancestor_layout);
-    }
+  filterx_scope_free_dup(dup);
 }
 
 typedef struct _AncestorDupCheckState
@@ -359,14 +342,7 @@ Test(filterx_scope, test_scope_dup_splits_into_own_and_flattened_ancestor_scopes
   cr_assert(state.msg_tied_seen);
   cr_assert(state.declared_seen);
 
-  FilterXScope *ancestor_dup = dup->parent_scope;
-  FilterXScopeVariableLayout *dup_layout = dup->layout;
-  filterx_scope_free(dup);
-  filterx_scope_variable_layout_free(dup_layout);
-
-  FilterXScopeVariableLayout *ancestor_dup_layout = ancestor_dup->layout;
-  filterx_scope_free(ancestor_dup);
-  filterx_scope_variable_layout_free(ancestor_dup_layout);
+  filterx_scope_free_dup(dup);
 }
 
 static void

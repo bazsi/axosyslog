@@ -583,26 +583,10 @@ filterx_eval_context_free_dup(FilterXEvalContext *context)
   if (!context)
     return;
 
-  /* filterx_scope_dup() may have produced a pair of scopes (see its
-   * comment): the "own" scope returned as context->scope, optionally
-   * parented onto a frozen, flattened ancestor scope. Each owns its own
-   * layout and must be freed individually -- filterx_scope_free() does
-   * not recurse into parent_scope, since that pointer is a live,
-   * externally owned link in the normal (non-dup'd) case. */
-  FilterXScope *scope = context->scope;
-  FilterXScope *ancestor_scope = scope->parent_scope;
-
-  FilterXScopeVariableLayout *layout = scope->layout;
-  /* also unrefs the retained message and all variable values */
-  filterx_scope_free(scope);
-  filterx_scope_variable_layout_free(layout);
-
-  if (ancestor_scope)
-    {
-      FilterXScopeVariableLayout *ancestor_layout = ancestor_scope->layout;
-      filterx_scope_free(ancestor_scope);
-      filterx_scope_variable_layout_free(ancestor_layout);
-    }
+  /* also unrefs the retained message and all variable values, plus the
+   * synthesized ancestor scope filterx_scope_dup() may have parented
+   * context->scope onto -- see filterx_scope_free_dup()'s comment. */
+  filterx_scope_free_dup(context->scope);
 
   filterx_object_unref(context->current_frame_meta);
   g_ptr_array_free(context->weak_refs, TRUE);

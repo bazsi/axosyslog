@@ -86,10 +86,13 @@ void filterx_scope_free(FilterXScope *self);
  * flattened snapshot of the message-tied and declared floating variables
  * visible through @self's ancestor chain (plain floating variables don't
  * survive a scope boundary by design, see filterx_variable_is_declared()).
- * Each scope in the returned chain owns its own FilterXScopeVariableLayout
- * (retrievable/freeable via ->layout); the caller must free both -- see
- * filterx_eval_context_free_dup() for the pattern. */
+ * Each scope in the returned chain owns its own FilterXScopeVariableLayout;
+ * free the result with filterx_scope_free_dup(), not a bare
+ * filterx_scope_free(). */
 FilterXScope *filterx_scope_dup(FilterXScope *self, FilterXScopeValueRetainFunc retain, gpointer user_data);
+
+/* The matching free for a filterx_scope_dup() result -- see its comment. */
+void filterx_scope_free_dup(FilterXScope *self);
 
 static inline void
 filterx_scope_set_dirty(FilterXScope *self)

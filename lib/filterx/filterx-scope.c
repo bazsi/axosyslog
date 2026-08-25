@@ -609,3 +609,29 @@ filterx_scope_dup(FilterXScope *self, FilterXScopeValueRetainFunc retain, gpoint
 
   return new_scope;
 }
+
+/* Frees a scope returned by filterx_scope_dup(), along with its layout and,
+ * if dup() parented it onto a synthesized ancestor scope (see dup()'s
+ * comment), that ancestor's own scope and layout as well. Callers must use
+ * this instead of a bare filterx_scope_free() on a dup() result: that
+ * ancestor is privately owned by @self here, unlike the normal (non-dup'd)
+ * case where parent_scope is a live, externally owned link that
+ * filterx_scope_free() deliberately never recurses into. */
+void
+filterx_scope_free_dup(FilterXScope *self)
+{
+  if (!self)
+    return;
+
+  FilterXScope *ancestor_scope = self->parent_scope;
+  FilterXScopeVariableLayout *layout = self->layout;
+  filterx_scope_free(self);
+  filterx_scope_variable_layout_free(layout);
+
+  if (ancestor_scope)
+    {
+      FilterXScopeVariableLayout *ancestor_layout = ancestor_scope->layout;
+      filterx_scope_free(ancestor_scope);
+      filterx_scope_variable_layout_free(ancestor_layout);
+    }
+}
