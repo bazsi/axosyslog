@@ -80,6 +80,7 @@ _map_to_filterx(MMDB_entry_data_list_s **entry_data_list, gint *status)
 {
   guint32 size = (*entry_data_list)->entry_data.data_size;
   FilterXObject *dict = filterx_dict_new();
+  filterx_object_cow_prepare(&dict);
 
   *entry_data_list = (*entry_data_list)->next;
   for (; size && *entry_data_list; size--)
@@ -101,6 +102,7 @@ _map_to_filterx(MMDB_entry_data_list_s **entry_data_list, gint *status)
       FILTERX_STRING_DECLARE_ON_STACK(dict_key, key, key_len);
       gboolean ok = filterx_object_set_subscript(dict, dict_key, &value);
       FILTERX_STRING_CLEAR_FROM_STACK(dict_key);
+      filterx_object_unref(value);
       if (!ok)
         {
           *status = MMDB_INVALID_DATA_ERROR;
@@ -108,6 +110,7 @@ _map_to_filterx(MMDB_entry_data_list_s **entry_data_list, gint *status)
         }
     }
 
+  filterx_object_set_dirty(dict, FALSE);
   return dict;
 
 error:
@@ -120,6 +123,7 @@ _array_to_filterx(MMDB_entry_data_list_s **entry_data_list, gint *status)
 {
   guint32 size = (*entry_data_list)->entry_data.data_size;
   FilterXObject *list = filterx_list_new();
+  filterx_object_cow_prepare(&list);
 
   *entry_data_list = (*entry_data_list)->next;
   for (; size && *entry_data_list; size--)
@@ -128,13 +132,16 @@ _array_to_filterx(MMDB_entry_data_list_s **entry_data_list, gint *status)
       if (MMDB_SUCCESS != *status)
         goto error;
 
-      if (!filterx_sequence_append(list, &value))
+      gboolean ok = filterx_sequence_append(list, &value);
+      filterx_object_unref(value);
+      if (!ok)
         {
           *status = MMDB_INVALID_DATA_ERROR;
           goto error;
         }
     }
 
+  filterx_object_set_dirty(list, FALSE);
   return list;
 
 error:

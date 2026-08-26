@@ -32,6 +32,8 @@
 #include "filterx/object-null.h"
 #include "filterx/object-dict.h"
 #include "filterx/object-list.h"
+#include "filterx/filterx-mapping.h"
+#include "filterx/filterx-sequence.h"
 #include "filterx/expr-literal.h"
 #include "filterx-func-geoip2.h"
 
@@ -185,7 +187,7 @@ Test(filterx_func_geoip2, test_nested_dict_field)
   FilterXObject *obj = init_and_eval_expr(func);
 
   cr_assert_not_null(obj);
-  cr_assert(filterx_object_is_type(obj, &FILTERX_TYPE_NAME(dict)));
+  cr_assert(filterx_object_is_type(filterx_ref_unwrap_ro(obj), &FILTERX_TYPE_NAME(mapping)));
   assert_object_json_equals(obj, "{\"code\":\"OX1\",\"confidence\":20}");
 
   filterx_object_unref(obj);
@@ -203,7 +205,7 @@ Test(filterx_func_geoip2, test_array_field)
   FilterXObject *obj = init_and_eval_expr(func);
 
   cr_assert_not_null(obj);
-  cr_assert(filterx_object_is_type(obj, &FILTERX_TYPE_NAME(list)));
+  cr_assert(filterx_object_is_type(filterx_ref_unwrap_ro(obj), &FILTERX_TYPE_NAME(sequence)));
 
   guint64 len;
   cr_assert(filterx_object_len(obj, &len));
@@ -212,7 +214,7 @@ Test(filterx_func_geoip2, test_array_field)
   FilterXObject *index_zero = filterx_integer_new(0);
   FilterXObject *first = filterx_object_get_subscript(obj, index_zero);
   cr_assert_not_null(first);
-  cr_assert(filterx_object_is_type(first, &FILTERX_TYPE_NAME(dict)));
+  cr_assert(filterx_object_is_type(filterx_ref_unwrap_ro(first), &FILTERX_TYPE_NAME(mapping)));
 
   FilterXObject *iso_code_key = filterx_string_new("iso_code", -1);
   FilterXObject *iso_code = filterx_object_get_subscript(first, iso_code_key);
@@ -238,12 +240,12 @@ Test(filterx_func_geoip2, test_whole_entry)
   FilterXObject *obj = init_and_eval_expr(func);
 
   cr_assert_not_null(obj);
-  cr_assert(filterx_object_is_type(obj, &FILTERX_TYPE_NAME(dict)));
+  cr_assert(filterx_object_is_type(filterx_ref_unwrap_ro(obj), &FILTERX_TYPE_NAME(mapping)));
 
   FilterXObject *country_key = filterx_string_new("country", -1);
   FilterXObject *country = filterx_object_get_subscript(obj, country_key);
   cr_assert_not_null(country);
-  cr_assert(filterx_object_is_type(country, &FILTERX_TYPE_NAME(dict)));
+  cr_assert(filterx_object_is_type(filterx_ref_unwrap_ro(country), &FILTERX_TYPE_NAME(mapping)));
 
   filterx_object_unref(country);
   filterx_object_unref(country_key);
