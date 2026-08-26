@@ -17,7 +17,7 @@ set(GEOIP2_SOURCES
   geoip-parser-parser.c
   geoip-plugin.c
   maxminddb-helper.c
-  filterx-func-geoip2.c
+  filterx-func-geoip.c
 )
 
 add_module(

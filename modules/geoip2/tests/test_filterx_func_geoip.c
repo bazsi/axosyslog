@@ -35,7 +35,7 @@
 #include "filterx/filterx-mapping.h"
 #include "filterx/filterx-sequence.h"
 #include "filterx/expr-literal.h"
-#include "filterx-func-geoip2.h"
+#include "filterx-func-geoip.h"
 
 /*
  * The origin of the database:
@@ -60,36 +60,36 @@ _construct(const gchar *ip, const gchar *database, const gchar *field, GError **
                                                          filterx_literal_new(filterx_string_new(field, -1))));
 
   GError *args_err = NULL;
-  FilterXExpr *func = filterx_function_geoip2_new(filterx_function_args_new(args, &args_err), error);
+  FilterXExpr *func = filterx_function_geoip_new(filterx_function_args_new(args, &args_err), error);
   cr_assert_null(args_err);
 
   return func;
 }
 
-Test(filterx_func_geoip2, test_empty_args_error)
+Test(filterx_func_geoip, test_empty_args_error)
 {
   GError *err = NULL;
   GError *args_err = NULL;
-  FilterXExpr *func = filterx_function_geoip2_new(filterx_function_args_new(NULL, &args_err), &err);
+  FilterXExpr *func = filterx_function_geoip_new(filterx_function_args_new(NULL, &args_err), &err);
 
   cr_assert_null(func);
   cr_assert_null(args_err);
   cr_assert_not_null(err);
-  cr_assert(strstr(err->message, FILTERX_FUNC_GEOIP2_USAGE) != NULL);
+  cr_assert(strstr(err->message, FILTERX_FUNC_GEOIP_USAGE) != NULL);
   g_error_free(err);
 }
 
-Test(filterx_func_geoip2, test_nonexistent_database_error)
+Test(filterx_func_geoip, test_nonexistent_database_error)
 {
   GError *err = NULL;
-  FilterXExpr *func = _construct(TEST_IP, "/nonexistent/geoip2-test-database.mmdb", NULL, &err);
+  FilterXExpr *func = _construct(TEST_IP, "/nonexistent/geoip-test-database.mmdb", NULL, &err);
 
   cr_assert_null(func);
   cr_assert_not_null(err);
   g_error_free(err);
 }
 
-Test(filterx_func_geoip2, test_field_argument_must_be_string_literal)
+Test(filterx_func_geoip, test_field_argument_must_be_string_literal)
 {
   GList *args = NULL;
   args = g_list_append(args, filterx_function_arg_new(NULL, filterx_literal_new(filterx_string_new(TEST_IP, -1))));
@@ -99,16 +99,16 @@ Test(filterx_func_geoip2, test_field_argument_must_be_string_literal)
 
   GError *err = NULL;
   GError *args_err = NULL;
-  FilterXExpr *func = filterx_function_geoip2_new(filterx_function_args_new(args, &args_err), &err);
+  FilterXExpr *func = filterx_function_geoip_new(filterx_function_args_new(args, &args_err), &err);
 
   cr_assert_null(func);
   cr_assert_null(args_err);
   cr_assert_not_null(err);
-  cr_assert(strstr(err->message, FILTERX_FUNC_GEOIP2_USAGE) != NULL);
+  cr_assert(strstr(err->message, FILTERX_FUNC_GEOIP_USAGE) != NULL);
   g_error_free(err);
 }
 
-Test(filterx_func_geoip2, test_default_field_is_country_iso_code)
+Test(filterx_func_geoip, test_default_field_is_country_iso_code)
 {
   GError *err = NULL;
   FilterXExpr *func = _construct(TEST_IP, TEST_DATABASE, NULL, &err);
@@ -125,7 +125,7 @@ Test(filterx_func_geoip2, test_default_field_is_country_iso_code)
   filterx_expr_unref(func);
 }
 
-Test(filterx_func_geoip2, test_integer_field)
+Test(filterx_func_geoip, test_integer_field)
 {
   GError *err = NULL;
   FilterXExpr *func = _construct(TEST_IP, TEST_DATABASE, "country.geoname_id", &err);
@@ -142,7 +142,7 @@ Test(filterx_func_geoip2, test_integer_field)
   filterx_expr_unref(func);
 }
 
-Test(filterx_func_geoip2, test_boolean_field)
+Test(filterx_func_geoip, test_boolean_field)
 {
   GError *err = NULL;
   FilterXExpr *func = _construct(TEST_IP, TEST_DATABASE, "country.is_in_european_union", &err);
@@ -159,7 +159,7 @@ Test(filterx_func_geoip2, test_boolean_field)
   filterx_expr_unref(func);
 }
 
-Test(filterx_func_geoip2, test_double_field)
+Test(filterx_func_geoip, test_double_field)
 {
   GError *err = NULL;
   FilterXExpr *func = _construct(TEST_IP, TEST_DATABASE, "location.latitude", &err);
@@ -176,7 +176,7 @@ Test(filterx_func_geoip2, test_double_field)
   filterx_expr_unref(func);
 }
 
-Test(filterx_func_geoip2, test_nested_dict_field)
+Test(filterx_func_geoip, test_nested_dict_field)
 {
   GError *err = NULL;
   FilterXExpr *func = _construct(TEST_IP, TEST_DATABASE, "postal", &err);
@@ -194,7 +194,7 @@ Test(filterx_func_geoip2, test_nested_dict_field)
   filterx_expr_unref(func);
 }
 
-Test(filterx_func_geoip2, test_array_field)
+Test(filterx_func_geoip, test_array_field)
 {
   GError *err = NULL;
   FilterXExpr *func = _construct(TEST_IP, TEST_DATABASE, "subdivisions", &err);
@@ -229,7 +229,7 @@ Test(filterx_func_geoip2, test_array_field)
   filterx_expr_unref(func);
 }
 
-Test(filterx_func_geoip2, test_whole_entry)
+Test(filterx_func_geoip, test_whole_entry)
 {
   GError *err = NULL;
   FilterXExpr *func = _construct(TEST_IP, TEST_DATABASE, "", &err);
@@ -253,7 +253,7 @@ Test(filterx_func_geoip2, test_whole_entry)
   filterx_expr_unref(func);
 }
 
-Test(filterx_func_geoip2, test_unknown_ip_returns_null)
+Test(filterx_func_geoip, test_unknown_ip_returns_null)
 {
   GError *err = NULL;
   FilterXExpr *func = _construct("127.0.0.1", TEST_DATABASE, NULL, &err);
@@ -270,7 +270,7 @@ Test(filterx_func_geoip2, test_unknown_ip_returns_null)
   filterx_expr_unref(func);
 }
 
-Test(filterx_func_geoip2, test_unknown_field_returns_null)
+Test(filterx_func_geoip, test_unknown_field_returns_null)
 {
   GError *err = NULL;
   FilterXExpr *func = _construct(TEST_IP, TEST_DATABASE, "does.not.exist", &err);
@@ -302,4 +302,4 @@ teardown(void)
   app_shutdown();
 }
 
-TestSuite(filterx_func_geoip2, .init = setup, .fini = teardown);
+TestSuite(filterx_func_geoip, .init = setup, .fini = teardown);

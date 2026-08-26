@@ -21,7 +21,7 @@
  *
  */
 
-#include "filterx-func-geoip2.h"
+#include "filterx-func-geoip.h"
 #include "maxminddb-helper.h"
 
 #include "filterx/object-string.h"
@@ -221,7 +221,7 @@ _eval(FilterXExpr *s)
 
   if (!filterx_object_extract_string_as_cstr_len(ip_obj, &ip_str, &ip_len))
     {
-      filterx_eval_push_error_info_printf("Failed to evaluate geoip2()",
+      filterx_eval_push_error_info_printf("Failed to evaluate geoip()",
                                           "ip argument must be string, got: %s",
                                           filterx_object_get_type_name(ip_obj));
       goto exit;
@@ -233,11 +233,11 @@ _eval(FilterXExpr *s)
   if (!lookup_result.found_entry)
     {
       if (gai_error != 0)
-        msg_debug("geoip2(): getaddrinfo failed",
+        msg_debug("geoip(): getaddrinfo failed",
                   evt_tag_str("ip", ip_str),
                   evt_tag_str("gai_error", gai_strerror(gai_error)));
       else if (mmdb_error != MMDB_SUCCESS)
-        msg_debug("geoip2(): maxminddb error",
+        msg_debug("geoip(): maxminddb error",
                   evt_tag_str("ip", ip_str),
                   evt_tag_str("error", MMDB_strerror(mmdb_error)));
 
@@ -255,7 +255,7 @@ _eval(FilterXExpr *s)
       result = filterx_null_new();
       break;
     case GEOIP2_LOOKUP_ERROR:
-      msg_debug("geoip2(): maxminddb error",
+      msg_debug("geoip(): maxminddb error",
                 evt_tag_str("ip", ip_str),
                 evt_tag_str("error", MMDB_strerror(status)));
       result = filterx_null_new();
@@ -299,7 +299,7 @@ _extract_ip_arg(FilterXFunctionArgs *args, GError **error)
   if (!ip_expr)
     {
       g_set_error(error, FILTERX_FUNCTION_ERROR, FILTERX_FUNCTION_ERROR_CTOR_FAIL,
-                  "argument must be set: ip. " FILTERX_FUNC_GEOIP2_USAGE);
+                  "argument must be set: ip. " FILTERX_FUNC_GEOIP_USAGE);
       return NULL;
     }
 
@@ -318,7 +318,7 @@ _extract_optional_args(FilterXFunctionGeoIP2 *self, FilterXFunctionArgs *args, G
       if (!database)
         {
           g_set_error(error, FILTERX_FUNCTION_ERROR, FILTERX_FUNCTION_ERROR_CTOR_FAIL,
-                      "database argument must be a string literal. " FILTERX_FUNC_GEOIP2_USAGE);
+                      "database argument must be a string literal. " FILTERX_FUNC_GEOIP_USAGE);
           return FALSE;
         }
       self->database_path = g_strdup(database);
@@ -331,7 +331,7 @@ _extract_optional_args(FilterXFunctionGeoIP2 *self, FilterXFunctionArgs *args, G
   if (!self->database_path)
     {
       g_set_error(error, FILTERX_FUNCTION_ERROR, FILTERX_FUNCTION_ERROR_CTOR_FAIL,
-                  "database argument must be set, no default GeoIP database found. " FILTERX_FUNC_GEOIP2_USAGE);
+                  "database argument must be set, no default GeoIP database found. " FILTERX_FUNC_GEOIP_USAGE);
       return FALSE;
     }
 
@@ -339,7 +339,7 @@ _extract_optional_args(FilterXFunctionGeoIP2 *self, FilterXFunctionArgs *args, G
   if (exists && !field)
     {
       g_set_error(error, FILTERX_FUNCTION_ERROR, FILTERX_FUNCTION_ERROR_CTOR_FAIL,
-                  "field argument must be a string literal. " FILTERX_FUNC_GEOIP2_USAGE);
+                  "field argument must be a string literal. " FILTERX_FUNC_GEOIP_USAGE);
       return FALSE;
     }
 
@@ -355,7 +355,7 @@ _extract_args(FilterXFunctionGeoIP2 *self, FilterXFunctionArgs *args, GError **e
   if (args_len != 1)
     {
       g_set_error(error, FILTERX_FUNCTION_ERROR, FILTERX_FUNCTION_ERROR_CTOR_FAIL,
-                  "invalid number of arguments. " FILTERX_FUNC_GEOIP2_USAGE);
+                  "invalid number of arguments. " FILTERX_FUNC_GEOIP_USAGE);
       return FALSE;
     }
 
@@ -376,7 +376,7 @@ _open_database(FilterXFunctionGeoIP2 *self, GError **error)
       g_free(self->database);
       self->database = NULL;
       g_set_error(error, FILTERX_FUNCTION_ERROR, FILTERX_FUNCTION_ERROR_CTOR_FAIL,
-                  "geoip2(): could not open database %s", self->database_path);
+                  "geoip(): could not open database %s", self->database_path);
       return FALSE;
     }
 
@@ -384,11 +384,11 @@ _open_database(FilterXFunctionGeoIP2 *self, GError **error)
 }
 
 FilterXExpr *
-filterx_function_geoip2_new(FilterXFunctionArgs *args, GError **error)
+filterx_function_geoip_new(FilterXFunctionArgs *args, GError **error)
 {
   FilterXFunctionGeoIP2 *self = g_new0(FilterXFunctionGeoIP2, 1);
 
-  filterx_function_init_instance(&self->super, "geoip2", FXE_READ);
+  filterx_function_init_instance(&self->super, "geoip", FXE_READ);
   self->super.super.eval = _eval;
   self->super.super.walk_children = _walk;
   self->super.super.free_fn = _free;
@@ -407,4 +407,4 @@ error:
   return NULL;
 }
 
-FILTERX_FUNCTION(geoip2, filterx_function_geoip2_new);
+FILTERX_FUNCTION(geoip, filterx_function_geoip_new);

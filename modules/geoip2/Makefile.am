@@ -10,8 +10,8 @@ modules_geoip2_libgeoip2_plugin_la_SOURCES=	\
 	modules/geoip2/geoip-plugin.c		\
 	modules/geoip2/maxminddb-helper.h	\
 	modules/geoip2/maxminddb-helper.c	\
-	modules/geoip2/filterx-func-geoip2.h	\
-	modules/geoip2/filterx-func-geoip2.c
+	modules/geoip2/filterx-func-geoip.h	\
+	modules/geoip2/filterx-func-geoip.c
 
 modules_geoip2_libgeoip2_plugin_la_CPPFLAGS	=	\
 	$(AM_CPPFLAGS)					\

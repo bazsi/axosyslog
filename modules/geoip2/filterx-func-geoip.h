@@ -21,17 +21,17 @@
  *
  */
 
-#ifndef FILTERX_FUNC_GEOIP2_H_INCLUDED
-#define FILTERX_FUNC_GEOIP2_H_INCLUDED
+#ifndef FILTERX_FUNC_GEOIP_H_INCLUDED
+#define FILTERX_FUNC_GEOIP_H_INCLUDED
 
 #include "plugin.h"
 #include "filterx/expr-function.h"
 
-#define FILTERX_FUNC_GEOIP2_USAGE \
-  "Usage: geoip2(ip, database=\"<db.mmdb>\", field=\"country.iso_code\")"
+#define FILTERX_FUNC_GEOIP_USAGE \
+  "Usage: geoip(ip, database=\"<db.mmdb>\", field=\"country.iso_code\")"
 
-FILTERX_FUNCTION_DECLARE(geoip2);
+FILTERX_FUNCTION_DECLARE(geoip);
 
-FilterXExpr *filterx_function_geoip2_new(FilterXFunctionArgs *args, GError **error);
+FilterXExpr *filterx_function_geoip_new(FilterXFunctionArgs *args, GError **error);
 
 #endif
