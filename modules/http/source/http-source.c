@@ -70,18 +70,25 @@ _extract_messages_line_separated(HTTPRequest *http_request, HTTPSourceConnection
 
   GQueue *messages = g_queue_new();
 
-  gchar *state;
   gchar *data = (gchar *) body->data;
-  gchar *line = strtok_r(data, "\n", &state);
+  gchar *line = data;
+  gchar *nl = strchrnul(data, '\n');
 
-  while (line)
+  while (1)
     {
-      gsize line_length = strlen(line);
-      LogMessage *msg = msg_format_construct_message(parse_options, (guchar *) line, line_length);
-      msg_format_parse_into(parse_options, msg, (guchar *) line, &line_length);
-      g_queue_push_tail(messages, msg);
+      gsize line_length = nl - line;
 
-      line = strtok_r(NULL, "\n", &state);
+      if (line_length)
+        {
+          LogMessage *msg = msg_format_construct_message(parse_options, (guchar *) line, line_length);
+          msg_format_parse_into(parse_options, msg, (guchar *) line, &line_length);
+          g_queue_push_tail(messages, msg);
+        }
+      if ((!*nl))
+        break;
+
+      line = nl + 1;
+      nl = strchrnul(line, '\n');
     }
   return messages;
 }
