@@ -178,6 +178,49 @@ _extract_messages_json(HTTPRequest *http_request, HTTPSourceConnection *connecti
 }
 
 GQueue *
+_extract_messages_es_bulk(HTTPRequest *http_request, HTTPSourceConnection *connection)
+{
+  EHTTPSourceDriver *self = (EHTTPSourceDriver *) connection->owner;
+  MsgFormatOptions *parse_options = &self->super.super.reader_options.parse_options;
+
+  http_request_null_terminate_body(http_request);
+  const GByteArray *body = http_message_get_body(&http_request->super);
+  if (!body || !body->data)
+    return NULL;
+
+  GQueue *messages = g_queue_new();
+
+  gchar *data = (gchar *) body->data;
+  gchar *action = data;
+  gchar *nl = strchrnul(data, '\n');
+
+  while (1)
+    {
+      if (!(*nl))
+        break;
+      gsize action_length = nl - action;
+      gchar *source = nl + 1;
+      nl = strchrnul(source, '\n');
+      gsize source_length = nl - source;
+
+      if (action_length && source_length)
+        {
+          LogMessage *msg = msg_format_construct_message(parse_options, (guchar *) source, source_length);
+          msg_format_parse_into(parse_options, msg, (guchar *) source, &source_length);
+          log_msg_set_value(msg, self->handles.elastic_bulk_action, action, action_length);
+          g_queue_push_tail(messages, msg);
+        }
+
+      if (!(*nl))
+        break;
+
+      action = nl + 1;
+      nl = strchrnul(action, '\n');
+    }
+  return messages;
+}
+
+GQueue *
 _extract_messages_auto(HTTPRequest *http_request, HTTPSourceConnection *connection)
 {
   EHTTPSourceDriver *self = (EHTTPSourceDriver *) connection->owner;
@@ -218,6 +261,7 @@ static EHTTPExtractMessageFunc ehttp_extract_modes[] =
   _extract_single_message,
   _extract_messages_line_separated,
   _extract_messages_json,
+  _extract_messages_es_bulk,
   _extract_messages_auto
 };
 
@@ -309,6 +353,8 @@ ehttp_sd_set_mode(LogDriver *d, const gchar *mode)
     self->mode = EHTTP_SINGLE;
   else if (strcasecmp(mode, "line-separated") == 0 || strcasecmp(mode, "jsonl") == 0)
     self->mode = EHTTP_LINE_SEPARATED;
+  else if (strcasecmp(mode, "es-bulk") == 0)
+    self->mode = EHTTP_ES_BULK;
   else if (strcasecmp(mode, "json") == 0)
     self->mode = EHTTP_JSON;
   else if (strcasecmp(mode, "auto") == 0)
