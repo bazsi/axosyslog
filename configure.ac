@@ -438,6 +438,9 @@ AC_ARG_ENABLE(jit,
 AC_ARG_WITH(llvm-config,
               [  --with-llvm-config=path      Specify llvm-config location],
               ,,with_llvm_config="")
+AC_ARG_WITH(llvm-linking,
+              [  --with-llvm-linking=shared|static  Link the JIT against the shared libLLVM or the static component archives (default: whatever llvm-config reports)],
+              ,,with_llvm_linking="auto")
 
 AC_ARG_ENABLE(all-modules,
               [  --enable-all-modules    Forcibly enable all modules. (default: auto)]
@@ -1898,13 +1901,33 @@ else
   AC_MSG_RESULT(no)
 fi
 
+llvm_static="no"
 if test "$enable_jit" = "yes"; then
   LLVM_CFLAGS="`$LLVM_CONFIG --cflags`"
   LLVM_CXXFLAGS="`$LLVM_CONFIG --cxxflags`"
-  llvm__ldflags="`$LLVM_CONFIG --ldflags`"
-  llvm__libs="`$LLVM_CONFIG --libs`"
-  llvm__syslibs="`$LLVM_CONFIG --system-libs`"
+
+  # --link-static/--link-shared apply to the three queries that make up the
+  # link line; llvm-config's default is the shared libLLVM when there is one.
+  case "$with_llvm_linking" in
+    static) llvm__linkflag="--link-static" ;;
+    shared) llvm__linkflag="--link-shared" ;;
+    auto)   llvm__linkflag="" ;;
+    *)      AC_MSG_ERROR([--with-llvm-linking takes shared or static, not '$with_llvm_linking']) ;;
+  esac
+  llvm__ldflags="`$LLVM_CONFIG $llvm__linkflag --ldflags`"
+  llvm__libs="`$LLVM_CONFIG $llvm__linkflag --libs`"
+  llvm__syslibs="`$LLVM_CONFIG $llvm__linkflag --system-libs`"
   LLVM_LIBS="$llvm__ldflags $llvm__libs $llvm__syslibs "
+
+  # Whether LLVM ends up as static archives in our link: asked for above, or
+  # llvm-config's own default on an installation without the libLLVM dylib.
+  # Either way --libs is then the component list (-lLLVMCore -lLLVMSupport ...)
+  # rather than the single -lLLVM-N token. This decides CCLD below.
+  AC_MSG_CHECKING([how LLVM is linked])
+  case " $llvm__libs " in
+    *" -lLLVM-"[[0-9]]*|*" -lLLVM "*) AC_MSG_RESULT([shared libLLVM]) ;;
+    *)                                llvm_static="yes"; AC_MSG_RESULT([static archives]) ;;
+  esac
 
   CPPFLAGS_SAVE="$CPPFLAGS"
   CPPFLAGS="$CPPFLAGS $LLVM_CFLAGS"
@@ -2225,17 +2248,39 @@ fi
 LOGGENPLUGIN_LDFLAGS=$MODULE_LDFLAGS
 MODULE_DEPS_LIBS="\$(top_builddir)/lib/libsyslog-ng.la"
 
-# syslog-ng binary is linked with the default link command (e.g. libtool)
+# syslog-ng binary is linked with the default link command (e.g. libtool);
+# CCLD below makes that the C++ driver whenever C++ is in the tree.
 
-if test "$enable_cpp" = "yes"; then
-  SYSLOGNG_LINK='$(CXXLINK)'
-else
-  SYSLOGNG_LINK='$(LINK)'
-fi
+SYSLOGNG_LINK='$(LINK)'
 
 if test "$enable_jit" = "yes" -a "x$linking_mode" = "xmonolithic"; then
   SYSLOGNG_LINK="$SYSLOGNG_LINK -Wl,--format=binary,lib/filterx/jit/libfilterx.bc,--format=default -Wl,--export-dynamic"
 fi
+
+# C++ objects reach C links in two ways. The C++ modules (grpc, cloud-auth,
+# examples) keep their C++ in a noinst convenience library and link it into a
+# module whose own sources are C, so automake would pick the C driver for a
+# library full of C++. And with the JIT on, LLVM is in the link of libsyslog-ng
+# and, in monolithic mode where libsyslog-ng is static, of every program that
+# reaches the JIT through it; a shared libLLVM brings its own C++ runtime
+# along, static archives do not. Either way a C link ends up with undefined
+# __cxa_* and std:: symbols.
+#
+# Rather than mark each such target as C++ one by one -- the tree used to
+# carry a phantom "force-cpp-linker-with-default-stdlib.cpp" source in a dozen
+# Makefile.am fragments for this -- let the C++ driver do every C link when
+# C++ is in the tree at all, or LLVM is static (llvm_static, see the JIT
+# section). automake emits CCLD = $(CC) only when nothing has defined CCLD,
+# and an AC_SUBSTed value counts, so this turns LINK into
+# "libtool --tag=CC --mode=link $(CXX) ...". The driver adds whichever C++
+# runtime it uses, libstdc++ or libc++, and ignores C-only front-end options
+# at link time, -flto included. Programs and modules that need no C++ simply
+# gain a NEEDED entry for the runtime. A C-only tree with a shared libLLVM
+# keeps the C driver.
+if test "$enable_cpp" = "yes" -o \( "$enable_jit" = "yes" -a "$llvm_static" = "yes" \); then
+  CCLD='$(CXX)'
+fi
+AC_SUBST([CCLD])
 
 if test "x$linking_mode" = "xdynamic"; then
 	SYSLOGNG_DEPS_LIBS="$LIBS $BASE_LIBS $GLIB_LIBS $EVTLOG_LIBS $SECRETSTORAGE_LIBS $RESOLV_LIBS $LIBCAP_LIBS $PCRE2_LIBS $REGEX_LIBS $LLVM_LIBS $DL_LIBS $LIBUNWIND_LIBS $JSON_LIBS $OPENSSL_LIBS"
