@@ -129,6 +129,16 @@ The term "nokafka" in `build.manifest` would be translated into a `--without
 kafka` command line option when building an rpm thereby omitting kafka
 related lines in the spec file.
 
+### NetBSD (pkgsrc)
+
+`packaging/netbsd/bootstrap-pkgsrc.sh` installs the same dependency set on a
+NetBSD host from pkgsrc. It is not a package build, only a bootstrap for
+building from source, so it is not part of any release artifact. It does
+mirror the deb/RPM dependency lists though, so when you add a build
+dependency above, add the matching pkgsrc package to the table in that script
+(or note it under "not available from pkgsrc" if there is none). See
+`packaging/netbsd/README.md`.
+
 ## Adding a new subpackage
 
 Sometimes you want to create a new subpackage that is generated when
