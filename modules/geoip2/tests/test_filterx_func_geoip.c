@@ -21,6 +21,7 @@
  */
 
 #include <criterion/criterion.h>
+#include <criterion/parameterized.h>
 #include "libtest/msg_parse_lib.h"
 #include "libtest/filterx-lib.h"
 
@@ -249,6 +250,73 @@ Test(filterx_func_geoip, test_whole_entry)
 
   filterx_object_unref(country);
   filterx_object_unref(country_key);
+  filterx_object_unref(obj);
+  filterx_expr_unref(func);
+}
+
+Test(filterx_func_geoip, test_ipv6_lookup)
+{
+  GError *err = NULL;
+  FilterXExpr *func = _construct("2001:218::", TEST_DATABASE, NULL, &err);
+
+  cr_assert_null(err);
+  cr_assert_not_null(func);
+
+  FilterXObject *obj = init_and_eval_expr(func);
+
+  cr_assert_not_null(obj);
+  assert_marshaled_object(obj, "JP", LM_VT_STRING);
+
+  filterx_object_unref(obj);
+  filterx_expr_unref(func);
+}
+
+Test(filterx_func_geoip, test_ipv4_mapped_ipv6_lookup)
+{
+  GError *err = NULL;
+  FilterXExpr *func = _construct("::ffff:" TEST_IP, TEST_DATABASE, NULL, &err);
+
+  cr_assert_null(err);
+  cr_assert_not_null(func);
+
+  FilterXObject *obj = init_and_eval_expr(func);
+
+  cr_assert_not_null(obj);
+  assert_marshaled_object(obj, "GB", LM_VT_STRING);
+
+  filterx_object_unref(obj);
+  filterx_expr_unref(func);
+}
+
+ParameterizedTestParameters(filterx_func_geoip, test_invalid_ip_returns_null)
+{
+  static const gchar *invalid_ips[] =
+  {
+    "not-an-ip",
+    "",
+    "2.125.160.216 ",
+    "2.125.160",
+    "2.125.160.216/29",
+    "2001:218::/32",
+    "example.com",
+  };
+
+  return cr_make_param_array(const gchar *, invalid_ips, G_N_ELEMENTS(invalid_ips));
+}
+
+ParameterizedTest(const gchar **ip, filterx_func_geoip, test_invalid_ip_returns_null)
+{
+  GError *err = NULL;
+  FilterXExpr *func = _construct(*ip, TEST_DATABASE, NULL, &err);
+
+  cr_assert_null(err);
+  cr_assert_not_null(func);
+
+  FilterXObject *obj = init_and_eval_expr(func);
+
+  cr_assert_not_null(obj);
+  cr_assert(filterx_object_is_type(obj, &FILTERX_TYPE_NAME(null)), "ip=%s", *ip);
+
   filterx_object_unref(obj);
   filterx_expr_unref(func);
 }

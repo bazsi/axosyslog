@@ -35,6 +35,17 @@
 
 #include "messages.h"
 
+#include <string.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+/* NOTE: a single instance of this expression is shared by every worker
+ * thread (the FilterX pipe clone only refs the block), so the MMDB_s handle
+ * below is used concurrently.  This needs no locking: libmaxminddb lookups
+ * never mutate the handle and allocate per-call, and every field of this
+ * struct is written only by the constructor.  MMDB_close() happens in
+ * _free(), which runs on the main thread while the workers are quiesced. */
 typedef struct FilterXFunctionGeoIP2_
 {
   FilterXFunction super;
@@ -46,6 +57,41 @@ typedef struct FilterXFunctionGeoIP2_
 
 static FilterXObject *_entry_data_list_to_filterx(MMDB_entry_data_list_s **entry_data_list, gint *status);
 
+/* FilterX integers are signed 64 bit; anything larger is returned as its
+ * exact decimal representation in a string rather than wrapping around. */
+static FilterXObject *
+_uint64_to_filterx(guint64 value)
+{
+  if (value <= (guint64) G_MAXINT64)
+    return filterx_integer_new((gint64) value);
+
+  return filterx_string_new_take(g_strdup_printf("%" G_GUINT64_FORMAT, value), -1);
+}
+
+/* 128 bit values are rendered as a 0x-prefixed, zero padded hex string, the
+ * same representation MMDB_dump_entry_data_list() uses. */
+static FilterXObject *
+_uint128_to_filterx(MMDB_entry_data_s *entry_data)
+{
+  gchar buf[2 + 32 + 1];
+
+#if MMDB_UINT128_IS_BYTE_ARRAY
+  gsize pos = 0;
+
+  buf[pos++] = '0';
+  buf[pos++] = 'x';
+  for (gsize i = 0; i < 16; i++)
+    pos += g_snprintf(buf + pos, sizeof(buf) - pos, "%02x", entry_data->uint128[i]);
+#else
+  guint64 hi = (guint64) (entry_data->uint128 >> 64);
+  guint64 lo = (guint64) entry_data->uint128;
+
+  g_snprintf(buf, sizeof(buf), "0x%016" G_GINT64_MODIFIER "x%016" G_GINT64_MODIFIER "x", hi, lo);
+#endif
+
+  return filterx_string_new(buf, -1);
+}
+
 static FilterXObject *
 _scalar_to_filterx(MMDB_entry_data_s *entry_data, gint *status)
 {
@@ -55,6 +101,8 @@ _scalar_to_filterx(MMDB_entry_data_s *entry_data, gint *status)
     {
     case MMDB_DATA_TYPE_UTF8_STRING:
       return filterx_string_new(entry_data->utf8_string, entry_data->data_size);
+    case MMDB_DATA_TYPE_BYTES:
+      return filterx_bytes_new((const gchar *) entry_data->bytes, entry_data->data_size);
     case MMDB_DATA_TYPE_DOUBLE:
       return filterx_double_new(entry_data->double_value);
     case MMDB_DATA_TYPE_FLOAT:
@@ -66,10 +114,14 @@ _scalar_to_filterx(MMDB_entry_data_s *entry_data, gint *status)
     case MMDB_DATA_TYPE_INT32:
       return filterx_integer_new(entry_data->int32);
     case MMDB_DATA_TYPE_UINT64:
-      return filterx_integer_new((gint64) entry_data->uint64);
+      return _uint64_to_filterx(entry_data->uint64);
+    case MMDB_DATA_TYPE_UINT128:
+      return _uint128_to_filterx(entry_data);
     case MMDB_DATA_TYPE_BOOLEAN:
       return filterx_boolean_new(entry_data->boolean);
     default:
+      /* pointers, containers and end markers never appear in a decoded
+       * entry, anything else means the data section is corrupt */
       *status = MMDB_INVALID_DATA_ERROR;
       return NULL;
     }
@@ -110,6 +162,13 @@ _map_to_filterx(MMDB_entry_data_list_s **entry_data_list, gint *status)
         }
     }
 
+  /* the entry list ended before the map reached its declared size */
+  if (size != 0)
+    {
+      *status = MMDB_INVALID_DATA_ERROR;
+      goto error;
+    }
+
   filterx_object_set_dirty(dict, FALSE);
   return dict;
 
@@ -139,6 +198,13 @@ _array_to_filterx(MMDB_entry_data_list_s **entry_data_list, gint *status)
           *status = MMDB_INVALID_DATA_ERROR;
           goto error;
         }
+    }
+
+  /* the entry list ended before the array reached its declared size */
+  if (size != 0)
+    {
+      *status = MMDB_INVALID_DATA_ERROR;
+      goto error;
     }
 
   filterx_object_set_dirty(list, FALSE);
@@ -206,6 +272,32 @@ _lookup_entry_path(FilterXFunctionGeoIP2 *self, MMDB_entry_s *start, FilterXObje
   return (*mmdb_status == MMDB_SUCCESS) ? GEOIP2_LOOKUP_FOUND : GEOIP2_LOOKUP_ERROR;
 }
 
+/* MMDB_lookup_string() goes through getaddrinfo(), which is needlessly
+ * heavy for a per-message hot path even with AI_NUMERICHOST.  We only
+ * accept numeric addresses anyway, so parse them with inet_pton() and use
+ * MMDB_lookup_sockaddr() directly. */
+static gboolean
+_parse_ip(const gchar *ip_str, struct sockaddr_storage *addr)
+{
+  memset(addr, 0, sizeof(*addr));
+
+  struct sockaddr_in *sin = (struct sockaddr_in *) addr;
+  if (inet_pton(AF_INET, ip_str, &sin->sin_addr) == 1)
+    {
+      sin->sin_family = AF_INET;
+      return TRUE;
+    }
+
+  struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *) addr;
+  if (inet_pton(AF_INET6, ip_str, &sin6->sin6_addr) == 1)
+    {
+      sin6->sin6_family = AF_INET6;
+      return TRUE;
+    }
+
+  return FALSE;
+}
+
 static FilterXObject *
 _eval(FilterXExpr *s)
 {
@@ -227,16 +319,21 @@ _eval(FilterXExpr *s)
       goto exit;
     }
 
-  int gai_error, mmdb_error;
-  MMDB_lookup_result_s lookup_result = MMDB_lookup_string(self->database, ip_str, &gai_error, &mmdb_error);
+  struct sockaddr_storage addr;
+  if (!_parse_ip(ip_str, &addr))
+    {
+      msg_debug("geoip(): argument is not a valid IPv4 or IPv6 address",
+                evt_tag_str("ip", ip_str));
+      result = filterx_null_new();
+      goto exit;
+    }
+
+  int mmdb_error;
+  MMDB_lookup_result_s lookup_result = MMDB_lookup_sockaddr(self->database, (struct sockaddr *) &addr, &mmdb_error);
 
   if (!lookup_result.found_entry)
     {
-      if (gai_error != 0)
-        msg_debug("geoip(): getaddrinfo failed",
-                  evt_tag_str("ip", ip_str),
-                  evt_tag_str("gai_error", gai_strerror(gai_error)));
-      else if (mmdb_error != MMDB_SUCCESS)
+      if (mmdb_error != MMDB_SUCCESS)
         msg_debug("geoip(): maxminddb error",
                   evt_tag_str("ip", ip_str),
                   evt_tag_str("error", MMDB_strerror(mmdb_error)));
