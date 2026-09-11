@@ -27,7 +27,8 @@ import pytest
 
 pytest.importorskip("botocore")
 
-from botocore.exceptions import ClientError, EndpointConnectionError  # noqa: E402
+from botocore.exceptions import ClientError, EndpointConnectionError, ReadTimeoutError  # noqa: E402
+from syslogng.modules.s3.compressable_file_buffer import CompressableFileBuffer  # noqa: E402
 from syslogng.modules.s3.s3_object import PART_UPLOAD_MAX_RETRIES, AlreadyFinishedError, S3Object, S3ObjectPersist  # noqa: E402
 
 LOGGER = getLogger(__name__)
@@ -37,6 +38,9 @@ CHUNK_SIZE = S3Object.MIN_CHUNK_SIZE_BYTES
 # a regression fails the test instead of hanging the whole test run.
 WAIT_TIMEOUT_SECONDS = 30
 
+# A negative probe: finish() must still be blocked when it expires, so it is short on purpose.
+BLOCKED_PROBE_SECONDS = 0.5
+
 
 class FakeS3Client:
     """A boto3 S3 client stub that records the calls and injects part upload failures on demand."""
@@ -44,6 +48,7 @@ class FakeS3Client:
     def __init__(
         self,
         transient_failure_part=None,
+        transient_failure_error=None,
         retryable_failure_part=None,
         retryable_failures=1,
         permanent_failure_part=None,
@@ -51,6 +56,7 @@ class FakeS3Client:
         failure_gate=None,
     ):
         self.transient_failure_part = transient_failure_part
+        self.transient_failure_error = transient_failure_error or EndpointConnectionError(endpoint_url="http://localhost")
         self.retryable_failure_part = retryable_failure_part
         self.retryable_failures = retryable_failures
         self.permanent_failure_part = permanent_failure_part
@@ -72,7 +78,7 @@ class FakeS3Client:
 
     def __injected_failure(self, part_number, attempt):
         if part_number == self.transient_failure_part and attempt == 1:
-            return EndpointConnectionError(endpoint_url="http://localhost")
+            return self.transient_failure_error
         if part_number == self.retryable_failure_part and attempt <= self.retryable_failures:
             return ClientError(
                 {"Error": {"Code": "InternalError"}, "ResponseMetadata": {"HTTPStatusCode": 500}},
@@ -199,8 +205,60 @@ def test_finish_after_a_chunk_rollover_closes_the_object(tmp_path):
     assert leftover_files(tmp_path) == []
 
 
+def test_finish_waits_for_an_in_flight_write(tmp_path, monkeypatch):
+    """Regression test: write() released the lock before writing the buffer, so a finish() from the
+    flush timer closed the chunk underneath and the write failed with an AssertionError."""
+    client = FakeS3Client()
+    s3_object = create_s3_object(tmp_path, ThreadPoolExecutor(max_workers=8), client, Event())
+    in_write = Event()
+    release_write = Event()
+    real_write = CompressableFileBuffer.write
+
+    def gated_write(buffer, data):
+        in_write.set()
+        assert release_write.wait(WAIT_TIMEOUT_SECONDS)
+        return real_write(buffer, data)
+
+    monkeypatch.setattr(CompressableFileBuffer, "write", gated_write)
+    errors = []
+
+    def write_while_gated():
+        try:
+            s3_object.write(b"data")
+        except Exception as e:
+            errors.append(e)
+
+    writer = Thread(target=write_while_gated)
+    writer.start()
+    assert in_write.wait(WAIT_TIMEOUT_SECONDS)
+    finisher = Thread(target=s3_object.finish)
+    finisher.start()
+    finisher.join(BLOCKED_PROBE_SECONDS)
+    finish_returned_early = not finisher.is_alive()
+    release_write.set()
+    writer.join(WAIT_TIMEOUT_SECONDS)
+    finisher.join(WAIT_TIMEOUT_SECONDS)
+
+    assert not finish_returned_early, "finish() closed the chunk while write() was still writing it"
+    assert errors == []
+    assert wait_for_uploads([s3_object])
+    assert client.completed_parts == {"test-key-0.log": [1]}
+
+
 def test_transient_part_upload_failure_is_retried(tmp_path):
     client = FakeS3Client(transient_failure_part=2)
+    s3_object = create_s3_object(tmp_path, ThreadPoolExecutor(max_workers=8), client, Event())
+    write_parts(s3_object, 3)
+    s3_object.finish()
+
+    assert wait_for_uploads([s3_object])
+    assert client.completed_parts == {"test-key-0.log": [1, 2, 3]}
+
+
+def test_read_timeout_on_a_part_upload_is_retried(tmp_path):
+    """Regression test: only EndpointConnectionError was retried, every other botocore network error
+    abandoned the part."""
+    client = FakeS3Client(transient_failure_part=2, transient_failure_error=ReadTimeoutError(endpoint_url="http://localhost"))
     s3_object = create_s3_object(tmp_path, ThreadPoolExecutor(max_workers=8), client, Event())
     write_parts(s3_object, 3)
     s3_object.finish()
