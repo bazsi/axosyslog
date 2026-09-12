@@ -48,7 +48,8 @@ lib_filterx_tests_TESTS		 =              \
 		lib/filterx/tests/test_json_repr \
 		lib/filterx/tests/test_access_path \
 		lib/filterx/tests/test_type_inference \
-		lib/filterx/tests/test_func_aggregate
+		lib/filterx/tests/test_func_aggregate \
+		lib/filterx/tests/test_filterx_retain
 
 EXTRA_DIST += lib/filterx/tests/CMakeLists.txt
 
@@ -197,3 +198,6 @@ lib_filterx_tests_test_json_repr_LDADD   = $(TEST_LDADD) $(JSON_LIBS)
 
 lib_filterx_tests_test_func_aggregate_CFLAGS  = $(TEST_CFLAGS)
 lib_filterx_tests_test_func_aggregate_LDADD   = $(TEST_LDADD) $(JSON_LIBS)
+
+lib_filterx_tests_test_filterx_retain_CFLAGS  = $(TEST_CFLAGS)
+lib_filterx_tests_test_filterx_retain_LDADD   = $(TEST_LDADD) $(JSON_LIBS)
