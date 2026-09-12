@@ -10,3 +10,7 @@ first message.
 Typical uses: reassembling a Cisco ISE event that arrives as several syslog fragments back into a single
 message, or squashing repeated firewall DROP log lines from the same retried connection attempt (e.g. TCP SYN
 retransmits to a closed port) into one summary line with aggregated packet and byte counters.
+
+If an aggregator cannot merge a message's value into the group (e.g. `sum` receiving a `null`), `aggregate()`
+fails for that message and discards the whole aggregation context of that key, cancelling its timeout: the
+next message for the same key starts a fresh group.
