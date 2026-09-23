@@ -287,8 +287,8 @@ _is_str_empty(const gchar *str)
   return !str || strcmp(str, "") == 0;
 }
 
-gchar *
-wall_clock_time_strptime(WallClockTime *wct, const gchar *format, const gchar *input)
+static gchar *
+_strptime(WallClockTime *wct, const gchar *format, const gchar *input)
 {
   unsigned char c;
   const unsigned char *bp, *ep, *zname;
@@ -386,7 +386,7 @@ literal:
           new_fmt = _TIME_LOCALE(loc)->d_fmt;
           state |= S_MON | S_MDAY | S_YEAR;
 recurse:
-          bp = (const unsigned char *)wall_clock_time_strptime(wct, new_fmt, (const char *)bp);
+          bp = (const unsigned char *)_strptime(wct, new_fmt, (const char *)bp);
           LEGAL_ALT(ALT_E);
           continue;
 
@@ -911,6 +911,18 @@ out:
   return __UNCONST(bp);
 }
 
+gchar *
+wall_clock_time_strptime(WallClockTime *wct, const gchar *format, const gchar *input)
+{
+  WallClockTime backup = *wct;
+  gchar *end = _strptime(wct, format, input);
+
+  if (!end)
+    *wct = backup;
+
+  return end;
+}
+
 /* Determine (guess) the year for the month.
  *
  * It can be used for BSD logs, where year is missing.
@@ -1164,8 +1176,9 @@ __strftime_fmt_1(WallClockTime *wct, char (*s)[100], size_t *l, int f, int pad)
       goto recu_strftime;
     case 's':
     {
-      WallClockTime wct_copy = *wct;
-      val = cached_mktime(&wct_copy.tm);
+      UnixTime ut = UNIX_TIME_INIT;
+      convert_wall_clock_time_to_unix_time(wct, &ut);
+      val = ut.ut_sec;
       width = 1;
       goto number;
     }

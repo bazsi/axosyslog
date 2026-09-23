@@ -5,12 +5,15 @@ EXTRA_DIST += \
 	tests/light/functional_tests/config_change/test_confgen_network_load_balancer.py \
 	tests/light/functional_tests/config_change/test_manipulating_config_between_reload.py \
 	tests/light/functional_tests/config_change/test_python_custom_options.py \
+	tests/light/functional_tests/config_change/test_warning_pragma.py \
 	tests/light/functional_tests/conftest.py \
 	tests/light/functional_tests/destination_drivers/arrow_flight_destination/test_arrow_flight_destination.py \
 	tests/light/functional_tests/destination_drivers/bigquery_destination/test_bigquery_destination.py \
 	tests/light/functional_tests/destination_drivers/example_destination/test_example_destination.py \
+	tests/light/functional_tests/destination_drivers/network_destination/test_altp_destination.py \
 	tests/light/functional_tests/destination_drivers/network_destination/test_kept_alive_tls_connection_doing_handshake_after_reload.py \
 	tests/light/functional_tests/destination_drivers/network_destination/test_network_destination_transport.py \
+	tests/light/functional_tests/destination_drivers/opentelemetry_destination/test_opentelemetry_destination_batching.py \
 	tests/light/functional_tests/destination_drivers/python_destination/test_python_destination.py \
 	tests/light/functional_tests/destination_drivers/s3_destination/test_s3_destination.py \
 	tests/light/functional_tests/destination_drivers/snmp_destination/general/test_snmp_destination_acceptance.py \
@@ -82,6 +85,7 @@ EXTRA_DIST += \
 	tests/light/functional_tests/source_drivers/network_source/proxyprotocol/test_pp_with_multiple_clients.py \
 	tests/light/functional_tests/source_drivers/network_source/proxyprotocol/test_pp_with_simple_tcp_connection.py \
 	tests/light/functional_tests/source_drivers/network_source/proxyprotocol/test_pp_with_syslog_proto.py \
+	tests/light/functional_tests/source_drivers/network_source/test_altp_source.py \
 	tests/light/functional_tests/source_drivers/network_source/test_network_transports.py \
 	tests/light/functional_tests/source_drivers/network_source/test_syslog_parser_timestamp_spinning.py \
 	tests/light/functional_tests/source_drivers/network_source/test_transport_error_metrics.py \
@@ -100,4 +104,5 @@ EXTRA_DIST += \
 	tests/light/functional_tests/template_functions/slog/test_secure_logging.py \
 	tests/light/functional_tests/templates/test_template_stmt.py \
 	tests/light/functional_tests/tools/loggen/test_loggen_with_reconnect.py \
+	tests/light/functional_tests/tools/syslog_ng_ctl/test_stop_force.py \
 	tests/light/functional_tests/value-pairs/test_value_pairs.py

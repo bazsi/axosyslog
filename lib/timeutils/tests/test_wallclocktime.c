@@ -145,6 +145,18 @@ Test(wallclocktime, test_strptime_usec_parse_finds_character)
   cr_expect(wct.wct_usec == 0, "%d", wct.wct_usec);
 }
 
+Test(wallclocktime, test_strptime_leaves_wct_untouched_on_failure)
+{
+  WallClockTime wct = WALL_CLOCK_TIME_INIT;
+  gchar *end;
+
+  end = wall_clock_time_strptime(&wct, "%b %d %Y %H:%M:%S", "Jan 16 2019 boom");
+  cr_assert_null(end);
+  cr_expect(wct.wct_mon == -1);
+  cr_expect(wct.wct_mday == -1);
+  cr_expect(wct.wct_year == -1);
+}
+
 Test(wallclocktime, test_strptime_percent_z_parses_rfc822_timezone)
 {
   WallClockTime wct = WALL_CLOCK_TIME_INIT;
@@ -568,7 +580,7 @@ Test(wallclocktime, test_strftime_all_format_spec)
     " %p %r %R %s %S %t '%T' %u %U %W %V %w %x %X %y %Y %z %Z";
   const gchar *expected =
     "Sat Saturday Aug August 'Sat Aug  7 09:29:12 2021' 20 07 '08/07/21' ' 7' 123456 '2021-08-07' 21 2021 Aug 09 09 219 08 29 \n"
-    " AM 09:29:12 AM 09:29 1628324952 12 \t '09:29:12' 6 31 31 31 6 08/07/21 09:29:12 21 2021 -0700 -07:00";
+    " AM 09:29:12 AM 09:29 1628353752 12 \t '09:29:12' 6 31 31 31 6 08/07/21 09:29:12 21 2021 -0700 -07:00";
 
   wall_clock_time_strptime(&wct, "%b %d %Y %H:%M:%S.%f %z", "Aug  7 2021 09:29:12.123456-07:00");
 
