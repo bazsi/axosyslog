@@ -26,6 +26,7 @@
 
 #include "multi-line/timestamp-multi-line.h"
 #include "apphook.h"
+#include "reloc.h"
 
 #include <string.h>
 #include <unistd.h>
@@ -290,6 +291,9 @@ Test(timestamp_multi_line, the_first_line_starts_an_event_even_without_a_timesta
 static void
 setup(void)
 {
+  /* the formats file is not installed yet when the tests run from the build tree */
+  override_installation_path_for("${pkgdatadir}/timestamp-multi-line.formats",
+                                 TOP_SRCDIR "/lib/multi-line/timestamp-multi-line.formats");
   app_startup();
   buffer = g_string_new(NULL);
   output_messages = g_ptr_array_new_with_free_func(g_free);

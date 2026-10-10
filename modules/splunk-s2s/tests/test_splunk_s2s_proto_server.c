@@ -31,6 +31,7 @@
 
 #include "apphook.h"
 #include "cfg.h"
+#include "reloc.h"
 
 #include <string.h>
 #include <iv.h>
@@ -1226,6 +1227,11 @@ Test(splunk_s2s_proto_server, mode_none_leaves_lines_unmerged)
 static void
 setup(void)
 {
+  /* the smart mode needs its state machine, which is not installed yet when
+   * the tests run from the build tree */
+  override_installation_path_for("${pkgdatadir}/smart-multi-line.fsm", TOP_SRCDIR "/lib/multi-line/smart-multi-line.fsm");
+  override_installation_path_for("${pkgdatadir}/timestamp-multi-line.formats",
+                                 TOP_SRCDIR "/lib/multi-line/timestamp-multi-line.formats");
   app_startup();
   init_proto_tests();
 }
