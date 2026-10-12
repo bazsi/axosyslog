@@ -32,6 +32,9 @@
 #include "cfg.h"
 #include "logmsg/logmsg.h"
 #include "scratch-buffers.h"
+#include "mainloop-worker.h"
+
+#include <iv.h>
 
 static void
 add_dummy_template_to_configuration(void)
@@ -367,6 +370,165 @@ Test(basicfuncs, test_bucket)
   assert_template_failure("$(bucket --weights 4097,1 $HOST)", "not greater than 4096");
   assert_template_failure("$(bucket --weights 4294967295,2 $HOST)", "not greater than 4096");
   assert_template_format("$(bucket --weights 4096,4096 host-a)", "1");
+}
+
+/* formats an already compiled template repeatedly, checking that the results
+ * follow the comma separated expected sequence */
+static void
+_assert_bucket_sequence(LogTemplate *templ, const gchar *expected_sequence)
+{
+  LogMessage *msg = create_sample_message();
+  GString *res = g_string_new("");
+  gchar **expected = g_strsplit(expected_sequence, ",", 0);
+
+  for (gint i = 0; expected[i]; i++)
+    {
+      LogMessageValueType type;
+
+      log_template_format_value_and_type(templ, msg, &DEFAULT_TEMPLATE_EVAL_OPTIONS, res, &type);
+      cr_assert_str_eq(res->str, expected[i],
+                       "bucket sequence mismatch at index %d, template=%s, actual=%s, expected=%s",
+                       i, templ->template_str, res->str, expected[i]);
+      cr_assert_eq(type, LM_VT_INTEGER);
+    }
+
+  g_strfreev(expected);
+  g_string_free(res, TRUE);
+  log_msg_unref(msg);
+}
+
+static void
+_assert_bucket_rr_sequence(const gchar *template, const gchar *expected_sequence)
+{
+  LogTemplate *templ = compile_template(template);
+
+  cr_assert(templ);
+  _assert_bucket_sequence(templ, expected_sequence);
+  log_template_unref(templ);
+}
+
+Test(basicfuncs, test_bucket_rr)
+{
+  /* the per-thread counter starts from zero and cycles through the buckets */
+  _assert_bucket_rr_sequence("$(bucket --rr --batch 1 1)", "0,0,0");
+  _assert_bucket_rr_sequence("$(bucket --rr --batch 1 3)", "0,1,2,0,1,2,0");
+
+  /* --batch keeps consecutive messages in the same bucket */
+  _assert_bucket_rr_sequence("$(bucket --rr --batch 2 3)", "0,0,1,1,2,2,0,0");
+  _assert_bucket_rr_sequence("$(bucket --batch 3 --rr 2)", "0,0,0,1,1,1,0");
+
+  /* --batch defaults to 100 */
+  GString *expected = g_string_new("");
+  for (gint i = 0; i < 100; i++)
+    g_string_append(expected, "0,");
+  for (gint i = 0; i < 100; i++)
+    g_string_append(expected, "1,");
+  g_string_append(expected, "0");
+  _assert_bucket_rr_sequence("$(bucket --rr 2)", expected->str);
+  g_string_free(expected, TRUE);
+
+  /* --weights: the cycle visits each bucket as many times as its weight */
+  _assert_bucket_rr_sequence("$(bucket --rr --batch 1 --weights 2,1)", "0,0,1,0,0,1,0");
+  _assert_bucket_rr_sequence("$(bucket --rr --batch 1 --weights 1,0,2)", "0,2,2,0,2,2");
+  _assert_bucket_rr_sequence("$(bucket --rr --batch 1 --weights 0,1,0)", "1,1,1,1");
+  _assert_bucket_rr_sequence("$(bucket --rr --batch 3 --weights 1,2)", "0,0,0,1,1,1,1,1,1,0,0,0");
+
+  /* instances have their own counters */
+  LogTemplate *first = compile_template("$(bucket --rr --batch 1 4)");
+  LogTemplate *second = compile_template("$(bucket --rr --batch 1 4)");
+  _assert_bucket_sequence(first, "0,1,2");
+  _assert_bucket_sequence(second, "0,1");
+  _assert_bucket_sequence(first, "3,0");
+  _assert_bucket_sequence(second, "2,3,0");
+  log_template_unref(first);
+  log_template_unref(second);
+
+  /* compile-time errors */
+  assert_template_failure("$(bucket --batch 2 3 $HOST)", "--batch is only valid together with --rr");
+  assert_template_failure("$(bucket --rr)", "--rr requires a bucket count or --weights");
+  assert_template_failure("$(bucket --rr --batch 2)", "--rr requires a bucket count or --weights");
+  assert_template_failure("$(bucket --rr 3 $HOST)", "--rr does not take value arguments");
+  assert_template_failure("$(bucket --rr --weights 1,2 $HOST)", "--rr does not take value arguments");
+  assert_template_failure("$(bucket --rr 0)", "bucket count must be a positive integer");
+  assert_template_failure("$(bucket --rr notanumber)", "bucket count must be a positive integer");
+  assert_template_failure("$(bucket --rr 4097)", "not greater than 4096");
+  assert_template_failure("$(bucket --rr --batch 0 3)", "--batch must be a positive integer");
+  assert_template_failure("$(bucket --rr --batch -1 3)", "--batch must be a positive integer");
+  assert_template_failure("$(bucket --rr --batch notanumber 3)", "--batch must be a positive integer");
+  assert_template_failure("$(bucket --rr --weights 0,0)", "must not all be zero");
+}
+
+typedef struct _BucketWorkerThreadArgs
+{
+  LogTemplate *templ;
+  const gchar *expected_sequence;
+  gint num_workers;
+} BucketWorkerThreadArgs;
+
+static GMutex bucket_workers_lock;
+static GCond bucket_workers_cond;
+static gint bucket_workers_started;
+
+/* wait until all num_workers threads have allocated their worker index, so
+ * that concurrently running workers are guaranteed to use distinct ones */
+static void
+_bucket_worker_thread_wait_for_others(gint num_workers)
+{
+  g_mutex_lock(&bucket_workers_lock);
+  bucket_workers_started++;
+  g_cond_broadcast(&bucket_workers_cond);
+  while (bucket_workers_started < num_workers)
+    g_cond_wait(&bucket_workers_cond, &bucket_workers_lock);
+  g_mutex_unlock(&bucket_workers_lock);
+}
+
+static gpointer
+_bucket_worker_thread(gpointer user_data)
+{
+  BucketWorkerThreadArgs *args = (BucketWorkerThreadArgs *) user_data;
+
+  iv_init();
+  main_loop_worker_thread_start(MLW_ASYNC_WORKER);
+  _bucket_worker_thread_wait_for_others(args->num_workers);
+
+  _assert_bucket_sequence(args->templ, args->expected_sequence);
+
+  main_loop_worker_thread_stop();
+  iv_deinit();
+  return NULL;
+}
+
+Test(basicfuncs, test_bucket_rr_counter_is_per_thread)
+{
+  LogTemplate *templ = compile_template("$(bucket --rr --batch 1 3)");
+
+  /* worker indexes are only handed out within the estimated thread count,
+   * which also sizes the counters on the first evaluation below */
+  main_loop_worker_allocate_thread_space(2);
+  main_loop_worker_finalize_thread_space();
+
+  /* the main thread has no worker index, it uses the shared counter */
+  _assert_bucket_sequence(templ, "0,1");
+
+  /* each worker thread starts its own cycle from bucket 0 */
+  BucketWorkerThreadArgs args = { .templ = templ, .expected_sequence = "0,1,2,0", .num_workers = 2 };
+  bucket_workers_started = 0;
+  GThread *first = g_thread_new("bucket-worker-1", _bucket_worker_thread, &args);
+  GThread *second = g_thread_new("bucket-worker-2", _bucket_worker_thread, &args);
+  g_thread_join(first);
+  g_thread_join(second);
+
+  /* a thread reusing a released worker index continues that index's counter,
+   * both workers above consumed 4 messages */
+  BucketWorkerThreadArgs reused_args = { .templ = templ, .expected_sequence = "1,2", .num_workers = 1 };
+  bucket_workers_started = 0;
+  GThread *third = g_thread_new("bucket-worker-3", _bucket_worker_thread, &reused_args);
+  g_thread_join(third);
+
+  /* ... and the main thread's own counter is unaffected by all of this */
+  _assert_bucket_sequence(templ, "2,0");
+
+  log_template_unref(templ);
 }
 
 Test(basicfuncs, test_fname_funcs)

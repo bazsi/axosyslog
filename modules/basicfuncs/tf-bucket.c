@@ -24,6 +24,8 @@
 /*
  * $(bucket <bucket-count> value...)
  * $(bucket --weights W1,W2,... value...)
+ * $(bucket --rr [--batch N] <bucket-count>)
+ * $(bucket --rr [--batch N] --weights W1,W2,...)
  *
  * Hashes its value arguments and returns a bucket index in the range
  * [0, bucket-count) (or [0, number-of-weights) in the
@@ -38,6 +40,17 @@
  *                         bucket-count argument. A bucket's share of the
  *                         input is proportional to its weight; a weight of
  *                         zero drains a bucket entirely.
+ *   --rr                  Non-sticky, round robin mode: instead of hashing
+ *                         value arguments (which are not accepted in this
+ *                         mode), messages are dealt out to the buckets in
+ *                         turn, driven by a per-thread counter that starts
+ *                         from zero. Each thread cycles through the buckets
+ *                         on its own, so the first message of every thread
+ *                         lands in bucket 0; with --weights the cycle
+ *                         visits each bucket as many times as its weight.
+ *   --batch N             With --rr, keep N consecutive messages of a
+ *                         thread in the same bucket before moving on to the
+ *                         next one. Defaults to 100.
  *
  * NOTE: the hash function used is not part of any documented contract: the
  * mapping from values to bucket indexes may change across syslog-ng
@@ -45,9 +58,31 @@
  * across upgrades.
  */
 
+#include "mainloop-worker.h"
+#include "atomic-gssize.h"
+
 /* upper bound on the bucket count, the number of weights and each
  * individual weight: keeps the weight sum well within guint range */
 #define TF_BUCKET_MAX_BUCKETS 4096
+
+#define TF_BUCKET_DEFAULT_BATCH_SIZE 100
+
+/* per-thread message counter of the --rr mode, padded so that the
+ * counters of different threads don't share a cache line */
+typedef union _TFBucketCounter
+{
+  guint64 value;          /* slots owned by a single worker thread */
+  atomic_gssize shared;   /* the slot shared by threads without a worker index */
+  gchar __pad[64];
+} TFBucketCounter;
+
+/* one slot per worker thread index, plus a shared one at the end for
+ * threads that don't have an index (e.g. the main thread) */
+typedef struct _TFBucketCounters
+{
+  gint num_workers;
+  TFBucketCounter slots[];
+} TFBucketCounters;
 
 typedef struct _TFBucketState
 {
@@ -55,6 +90,13 @@ typedef struct _TFBucketState
   guint num_buckets;
   guint *weights;         /* NULL for the plain (uniform bucket-count) form */
   guint weights_sum;
+
+  /* --rr */
+  gboolean round_robin;
+  guint64 batch_size;
+
+  /* allocated on first use, see _tf_bucket_get_counters() */
+  TFBucketCounters *counters;
 } TFBucketState;
 
 static gboolean
@@ -121,15 +163,90 @@ _tf_bucket_parse_weights(const gchar *weights_str, guint **out_weights, guint *o
 }
 
 static gboolean
+_tf_bucket_parse_bucket_count(const gchar *count_str, guint *out_num_buckets, GError **error)
+{
+  gint64 count;
+
+  if (!parse_int64(count_str, &count) || count < 1 || count > TF_BUCKET_MAX_BUCKETS)
+    {
+      g_set_error(error, LOG_TEMPLATE_ERROR, LOG_TEMPLATE_ERROR_COMPILE,
+                  "$(bucket) bucket count must be a positive integer not greater than %d, got \"%s\"",
+                  TF_BUCKET_MAX_BUCKETS, count_str);
+      return FALSE;
+    }
+  *out_num_buckets = (guint) count;
+  return TRUE;
+}
+
+static gboolean
+_tf_bucket_parse_batch_size(const gchar *batch_size_str, guint64 *out_batch_size, GError **error)
+{
+  gint64 batch_size;
+
+  if (!parse_int64(batch_size_str, &batch_size) || batch_size < 1)
+    {
+      g_set_error(error, LOG_TEMPLATE_ERROR, LOG_TEMPLATE_ERROR_COMPILE,
+                  "$(bucket) --batch must be a positive integer, got \"%s\"", batch_size_str);
+      return FALSE;
+    }
+  *out_batch_size = (guint64) batch_size;
+  return TRUE;
+}
+
+/* $(bucket --rr [--batch N] <bucket-count>)
+ * $(bucket --rr [--batch N] --weights W1,W2,...)
+ *
+ * NOTE: the weights (if any) are already parsed into state at this point */
+static gboolean
+_tf_bucket_prepare_round_robin(LogTemplateFunction *self, TFBucketState *state, LogTemplate *parent,
+                               gint argc, gchar *argv[], const gchar *batch_size_str, GError **error)
+{
+  gint num_positional_args = state->weights ? 0 : 1;
+
+  if (argc - 1 < num_positional_args)
+    {
+      g_set_error(error, LOG_TEMPLATE_ERROR, LOG_TEMPLATE_ERROR_COMPILE,
+                  "$(bucket) --rr requires a bucket count or --weights, "
+                  "usage: $(bucket --rr [--batch N] <bucket-count>)");
+      return FALSE;
+    }
+
+  if (argc - 1 > num_positional_args)
+    {
+      g_set_error(error, LOG_TEMPLATE_ERROR, LOG_TEMPLATE_ERROR_COMPILE,
+                  "$(bucket) --rr does not take value arguments, as the bucket is not derived from "
+                  "message content, got \"%s\"", argv[num_positional_args + 1]);
+      return FALSE;
+    }
+
+  if (!state->weights && !_tf_bucket_parse_bucket_count(argv[1], &state->num_buckets, error))
+    return FALSE;
+
+  state->batch_size = TF_BUCKET_DEFAULT_BATCH_SIZE;
+  if (batch_size_str && !_tf_bucket_parse_batch_size(batch_size_str, &state->batch_size, error))
+    return FALSE;
+
+  state->round_robin = TRUE;
+
+  /* no value arguments, nothing to compile: argv[0] is the function name */
+  return tf_simple_func_prepare(self, state, parent, 1, argv, error);
+}
+
+static gboolean
 tf_bucket_prepare(LogTemplateFunction *self, gpointer s, LogTemplate *parent, gint argc, gchar *argv[],
                   GError **error)
 {
   TFBucketState *state = (TFBucketState *) s;
   GOptionContext *ctx;
   gchar *weights_str = NULL;
+  gboolean round_robin = FALSE;
+  gchar *batch_size_str = NULL;
+  gboolean success = FALSE;
   GOptionEntry bucket_options[] =
   {
     { "weights", 0, 0, G_OPTION_ARG_STRING, &weights_str, NULL, NULL },
+    { "rr", 0, 0, G_OPTION_ARG_NONE, &round_robin, NULL, NULL },
+    { "batch", 0, 0, G_OPTION_ARG_STRING, &batch_size_str, NULL, NULL },
     { NULL }
   };
 
@@ -140,29 +257,38 @@ tf_bucket_prepare(LogTemplateFunction *self, gpointer s, LogTemplate *parent, gi
   if (!g_option_context_parse(ctx, &argc, &argv, error))
     {
       g_option_context_free(ctx);
-      g_free(weights_str);
-      return FALSE;
+      goto exit;
     }
   g_option_context_free(ctx);
 
-  if (weights_str)
+  if (batch_size_str && !round_robin)
     {
-      gboolean success = _tf_bucket_parse_weights(weights_str, &state->weights, &state->num_buckets,
-                                                  &state->weights_sum, error);
-      g_free(weights_str);
-      if (!success)
-        return FALSE;
+      g_set_error(error, LOG_TEMPLATE_ERROR, LOG_TEMPLATE_ERROR_COMPILE,
+                  "$(bucket) --batch is only valid together with --rr");
+      goto exit;
+    }
 
+  if (weights_str
+      && !_tf_bucket_parse_weights(weights_str, &state->weights, &state->num_buckets, &state->weights_sum, error))
+    goto exit;
+
+  if (round_robin)
+    {
+      success = _tf_bucket_prepare_round_robin(self, state, parent, argc, argv, batch_size_str, error);
+      goto exit;
+    }
+
+  if (state->weights)
+    {
       if (argc < 2)
         {
           g_set_error(error, LOG_TEMPLATE_ERROR, LOG_TEMPLATE_ERROR_COMPILE,
                       "$(bucket) requires at least one value argument");
-          g_free(state->weights);
-          state->weights = NULL;
-          return FALSE;
+          goto exit;
         }
 
-      return tf_simple_func_prepare(self, state, parent, argc, argv, error);
+      success = tf_simple_func_prepare(self, state, parent, argc, argv, error);
+      goto exit;
     }
 
   if (argc < 3)
@@ -170,27 +296,23 @@ tf_bucket_prepare(LogTemplateFunction *self, gpointer s, LogTemplate *parent, gi
       g_set_error(error, LOG_TEMPLATE_ERROR, LOG_TEMPLATE_ERROR_COMPILE,
                   "$(bucket) requires a bucket count and at least one value argument, "
                   "usage: $(bucket <bucket-count> value...)");
-      return FALSE;
+      goto exit;
     }
 
-  gint64 count;
-  if (!parse_int64(argv[1], &count) || count < 1 || count > TF_BUCKET_MAX_BUCKETS)
-    {
-      g_set_error(error, LOG_TEMPLATE_ERROR, LOG_TEMPLATE_ERROR_COMPILE,
-                  "$(bucket) bucket count must be a positive integer not greater than %d, got \"%s\"",
-                  TF_BUCKET_MAX_BUCKETS, argv[1]);
-      return FALSE;
-    }
-  state->num_buckets = (guint) count;
-  state->weights = NULL;
+  if (!_tf_bucket_parse_bucket_count(argv[1], &state->num_buckets, error))
+    goto exit;
 
   gchar **value_argv = g_new(gchar *, argc - 1);
   value_argv[0] = argv[0];
   for (gint i = 2; i < argc; i++)
     value_argv[i - 1] = argv[i];
 
-  gboolean success = tf_simple_func_prepare(self, state, parent, argc - 1, value_argv, error);
+  success = tf_simple_func_prepare(self, state, parent, argc - 1, value_argv, error);
   g_free(value_argv);
+
+exit:
+  g_free(weights_str);
+  g_free(batch_size_str);
   return success;
 }
 
@@ -234,7 +356,7 @@ _tf_bucket_hash_combine(gint argc, GString *argv[])
 }
 
 static guint
-_tf_bucket_select(TFBucketState *state, guint hash)
+_tf_bucket_select(TFBucketState *state, guint64 hash)
 {
   if (!state->weights)
     return hash % state->num_buckets;
@@ -251,13 +373,65 @@ _tf_bucket_select(TFBucketState *state, guint hash)
   g_assert_not_reached();
 }
 
+/* The number of worker threads is only known once the configuration is
+ * initialized, which happens after the templates are compiled but before
+ * the first message gets here, so the counters are sized on first use. */
+static TFBucketCounters *
+_tf_bucket_get_counters(TFBucketState *state)
+{
+  TFBucketCounters *counters = g_atomic_pointer_get(&state->counters);
+
+  if (G_LIKELY(counters))
+    return counters;
+
+  gint num_workers = main_loop_worker_get_max_number_of_threads();
+  counters = g_malloc0(sizeof(TFBucketCounters) + sizeof(TFBucketCounter) * (num_workers + 1));
+  counters->num_workers = num_workers;
+
+  if (!g_atomic_pointer_compare_and_exchange(&state->counters, NULL, counters))
+    {
+      /* another thread got here first */
+      g_free(counters);
+      counters = g_atomic_pointer_get(&state->counters);
+    }
+  return counters;
+}
+
+/* --rr: the per-thread counter divided by the batch size, so that
+ * batch-size consecutive messages of a thread are dealt to the same bucket */
+static guint64
+_tf_bucket_next_round_robin_slot(TFBucketState *state)
+{
+  TFBucketCounters *counters = _tf_bucket_get_counters(state);
+  gint thread_index = main_loop_worker_get_thread_index();
+  guint64 counter;
+
+  if (thread_index >= 0 && thread_index < counters->num_workers)
+    {
+      /* this slot is only ever touched by the thread owning the index */
+      counter = counters->slots[thread_index].value++;
+    }
+  else
+    {
+      counter = (guint64) atomic_gssize_inc(&counters->slots[counters->num_workers].shared);
+    }
+
+  return counter / state->batch_size;
+}
+
 static void
 tf_bucket_call(LogTemplateFunction *self, gpointer s, const LogTemplateInvokeArgs *args, GString *result,
                LogMessageValueType *type)
 {
   TFBucketState *state = (TFBucketState *) s;
-  guint hash = _tf_bucket_hash_combine(state->super.argc, (GString **) args->argv);
-  guint bucket = _tf_bucket_select(state, hash);
+  guint64 slot;
+
+  if (state->round_robin)
+    slot = _tf_bucket_next_round_robin_slot(state);
+  else
+    slot = _tf_bucket_hash_combine(state->super.argc, (GString **) args->argv);
+
+  guint bucket = _tf_bucket_select(state, slot);
 
   *type = LM_VT_INTEGER;
   g_string_append_printf(result, "%u", bucket);
@@ -269,6 +443,7 @@ tf_bucket_free_state(gpointer s)
   TFBucketState *state = (TFBucketState *) s;
 
   g_free(state->weights);
+  g_free(state->counters);
   tf_simple_func_free_state(&state->super);
 }
 
