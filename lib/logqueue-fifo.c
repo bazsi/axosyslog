@@ -35,6 +35,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdlib.h>
 #include <iv_thread.h>
 
 QueueType log_queue_fifo_type = "FIFO";
@@ -117,9 +118,13 @@ typedef struct _LogQueueFifo
   } metrics;
 
   gint num_input_queues;
-  /* points into the same allocation, aligned to INPUT_QUEUE_ALIGNMENT */
-  InputQueue *input_queues;
+  InputQueue input_queues[0];
 } LogQueueFifo;
+
+/* InputQueue is declared aligned, so the compiler already places the slot
+ * array on a cache line boundary within the struct; the allocation itself
+ * has to honour that too, see log_queue_fifo_new(). */
+G_STATIC_ASSERT(G_STRUCT_OFFSET(LogQueueFifo, input_queues) % INPUT_QUEUE_ALIGNMENT == 0);
 
 /* NOTE: this is inherently racy. If the LogQueue->lock is taken, then the
  * race is limited to the changes in output_queue queue changes.
@@ -722,13 +727,17 @@ log_queue_fifo_new(gint log_fifo_size, const gchar *persist_name, gint stats_lev
   LogQueueFifo *self;
 
   gint max_threads = main_loop_worker_get_max_number_of_threads();
+  gsize size = sizeof(LogQueueFifo) + max_threads * sizeof(InputQueue);
 
-  /* the per-thread input queues follow the header in the same allocation,
-   * padded so that the first one starts on a cache line boundary */
-  self = g_malloc0(sizeof(LogQueueFifo) + INPUT_QUEUE_ALIGNMENT - 1 + max_threads * sizeof(InputQueue));
-  guintptr slots = (guintptr) (self + 1);
-  slots = (slots + INPUT_QUEUE_ALIGNMENT - 1) & ~(guintptr) (INPUT_QUEUE_ALIGNMENT - 1);
-  self->input_queues = (InputQueue *) slots;
+  /* g_malloc() only guarantees 16 byte alignment, which would defeat the
+   * cache line alignment of the per-thread input queues.  The object is
+   * released with g_free() by log_queue_free_method(), which is plain free()
+   * in every GLib we build against (the allocator vtable was removed in
+   * 2.46), so posix_memalign() memory is safe to hand to it. */
+  void *mem;
+  if (posix_memalign(&mem, INPUT_QUEUE_ALIGNMENT, size) != 0)
+    g_error("%s: failed to allocate %" G_GSIZE_FORMAT " bytes", G_STRLOC, size);
+  self = memset(mem, 0, size);
 
   if (queue_sck_builder)
     {
