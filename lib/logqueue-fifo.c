@@ -72,15 +72,25 @@ QueueType log_queue_fifo_type = "FIFO";
  *
  */
 
+/* Per-thread input queue.  Each input thread writes its own slot on every
+ * push without taking a lock, so the slots must not share cache lines with
+ * each other (or with the queue header, which the output thread writes):
+ * otherwise the cores would ping-pong the line on every message even though
+ * no data is actually shared.  The struct is kept at exactly one cache line
+ * and the slot array is aligned to a cache line boundary at allocation. */
+
+#define INPUT_QUEUE_ALIGNMENT 64
+
 typedef struct _InputQueue
 {
   struct iv_list_head items;
   WorkerBatchCallback cb;
   guint32 len;
   guint32 non_flow_controlled_len;
-  UnixTime first_message_recvd;
   gsize total_size;
-} InputQueue;
+} __attribute__((aligned(INPUT_QUEUE_ALIGNMENT))) InputQueue;
+
+G_STATIC_ASSERT(sizeof(InputQueue) == INPUT_QUEUE_ALIGNMENT);
 
 typedef struct _OverflowQueue
 {
@@ -107,7 +117,8 @@ typedef struct _LogQueueFifo
   } metrics;
 
   gint num_input_queues;
-  InputQueue input_queues[0];
+  /* points into the same allocation, aligned to INPUT_QUEUE_ALIGNMENT */
+  InputQueue *input_queues;
 } LogQueueFifo;
 
 /* NOTE: this is inherently racy. If the LogQueue->lock is taken, then the
@@ -294,6 +305,17 @@ _message_has_to_be_dropped(LogQueueFifo *self, const LogPathOptions *path_option
          && log_queue_fifo_get_non_flow_controlled_length(self) >= self->log_fifo_size;
 }
 
+/* The receive timestamp of the oldest message in the input queue.  Rather
+ * than storing it in InputQueue (which would push the struct over a cache
+ * line), it is read from the first queued node, once every 128 messages. */
+static inline const UnixTime *
+_input_queue_first_message_recvd(InputQueue *input_queue)
+{
+  LogMessageQueueNode *first = iv_list_entry(input_queue->items.next, LogMessageQueueNode, list);
+
+  return &first->msg->timestamps[LM_TS_RECVD];
+}
+
 /**
  * Assumed to be called from one of the input threads. If the thread_index
  * cannot be determined, the item is put directly in the wait queue.
@@ -346,7 +368,6 @@ log_queue_fifo_push_tail(LogQueue *s, LogMessage *msg, const LogPathOptions *pat
 
           main_loop_worker_register_batch_callback(&self->input_queues[thread_index].cb);
           log_queue_ref(&self->super);
-          self->input_queues[thread_index].first_message_recvd = msg->timestamps[LM_TS_RECVD];
         }
 
       log_msg_write_protect(msg);
@@ -366,7 +387,8 @@ log_queue_fifo_push_tail(LogQueue *s, LogMessage *msg, const LogPathOptions *pat
            */
 
           gint64 input_queue_age_msec =
-            unix_time_diff_in_msec(&msg->timestamps[LM_TS_RECVD], &self->input_queues[thread_index].first_message_recvd);
+            unix_time_diff_in_msec(&msg->timestamps[LM_TS_RECVD],
+                                   _input_queue_first_message_recvd(&self->input_queues[thread_index]));
 
           flush_input_queue = input_queue_age_msec > 100;
         }
@@ -700,7 +722,13 @@ log_queue_fifo_new(gint log_fifo_size, const gchar *persist_name, gint stats_lev
   LogQueueFifo *self;
 
   gint max_threads = main_loop_worker_get_max_number_of_threads();
-  self = g_malloc0(sizeof(LogQueueFifo) + max_threads * sizeof(self->input_queues[0]));
+
+  /* the per-thread input queues follow the header in the same allocation,
+   * padded so that the first one starts on a cache line boundary */
+  self = g_malloc0(sizeof(LogQueueFifo) + INPUT_QUEUE_ALIGNMENT - 1 + max_threads * sizeof(InputQueue));
+  guintptr slots = (guintptr) (self + 1);
+  slots = (slots + INPUT_QUEUE_ALIGNMENT - 1) & ~(guintptr) (INPUT_QUEUE_ALIGNMENT - 1);
+  self->input_queues = (InputQueue *) slots;
 
   if (queue_sck_builder)
     {
