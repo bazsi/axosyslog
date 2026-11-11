@@ -28,3 +28,5 @@ log {
 Network (`network()`, `tcp()`, `udp()`, ...), threaded (e.g. `http()`, `python()`) and `file()` destinations report
 themselves unreachable while they cannot connect or cannot open their file. A destination reference is handled as a
 unit, so a message dropped inside it (e.g. by `filterx`) also triggers the failover.
+A message a destination rejects does not continue along the rest of its path, so for example a `filterx` block
+following the destination in the same `channel` (updating a metric, say) only sees messages that destination accepted.

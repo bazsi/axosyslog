@@ -386,3 +386,40 @@ def test_destination_failover_fallback_branch_is_the_last_alternative(config, sy
     messages = _messages("failover")
     source.write_logs(_syslog_lines(messages))
     assert len(fallback.read_until_logs(messages)) == NUM_MESSAGES
+
+
+def test_destination_failover_rejected_message_skips_the_rest_of_the_destination_reference(config, syslog_ng, port_allocator):
+    config.add_preamble(
+        r"""
+destination d_unreachable_then_metric {
+    channel {
+        destination { file("missing-dir/primary.log"); };
+        filterx { update_metric("primary_accepted_total"); };
+        destination { file("after-primary.log"); };
+    };
+};
+
+destination d_secondary_then_metric {
+    file("secondary.log");
+    filterx { update_metric("secondary_accepted_total"); };
+};
+""",
+    )
+
+    source = config.create_network_source(ip="localhost", port=port_allocator(), transport="tcp")
+    primary = _NamedDestinationReference("d_unreachable_then_metric")
+    secondary = _NamedDestinationReference("d_secondary_then_metric")
+    _create_failover_logpath(config, source, primary, secondary)
+
+    syslog_ng.start(config)
+
+    messages = _messages("failover")
+    source.write_logs(_syslog_lines(messages))
+    assert _read_lines("secondary.log", NUM_MESSAGES)[-1].endswith(messages[-1])
+
+    samples = config.get_prometheus_samples([MetricFilter("syslogng_secondary_accepted_total", {})])
+    assert [int(sample.value) for sample in samples] == [NUM_MESSAGES]
+    assert config.get_prometheus_samples([MetricFilter("syslogng_primary_accepted_total", {})]) == []
+
+    syslog_ng.stop()
+    assert not Path("after-primary.log").exists()
