@@ -328,6 +328,68 @@ Test(logmpx, destination_failover_rejection_propagates_through_a_delivery_propag
   _free_pipe(&secondary->super);
 }
 
+Test(logmpx, destination_failover_rejection_stops_the_rest_of_the_alternative)
+{
+  /* failover multiplexer -> mpx_ref -> leaf (down), with mpx_ref's
+   * pipe_next standing in for whatever follows the destination on the
+   * same alternative (e.g. a filterx block updating a metric).  A rejected
+   * message must not reach it. */
+  FailoverMockPipe *leaf = _failover_mock_pipe_new(NULL, TRUE);
+  FailoverMockPipe *after_leaf = _failover_mock_pipe_new(NULL, FALSE);
+  FailoverMockPipe *secondary = _failover_mock_pipe_new(NULL, FALSE);
+  LogMultiplexer *mpx_ref = log_multiplexer_new(NULL);
+
+  log_multiplexer_disable_delivery_propagation(mpx_ref);
+  log_pipe_init(&leaf->super);
+  log_pipe_init(&after_leaf->super);
+  log_multiplexer_add_next_hop(mpx_ref, &leaf->super);
+  log_pipe_append(&mpx_ref->super, &after_leaf->super);
+
+  LogPipe *pipes[2] = { &mpx_ref->super, &secondary->super };
+  LogMultiplexer *mpx = _create_destination_failover_mpx(NULL, pipes, 2);
+
+  _queue_empty_message(&mpx->super);
+  cr_assert_eq(leaf->captured_messages->len, 0);
+  cr_assert_eq(after_leaf->captured_messages->len, 0, "a rejected message must not continue along the alternative");
+  cr_assert_eq(secondary->captured_messages->len, 1);
+
+  leaf->down = FALSE;
+  _queue_empty_message(&mpx->super);
+  cr_assert_eq(leaf->captured_messages->len, 1);
+  cr_assert_eq(after_leaf->captured_messages->len, 1, "an accepted message continues along the alternative");
+  cr_assert_eq(secondary->captured_messages->len, 1);
+
+  _free_pipe(&mpx->super);
+  _free_pipe(&mpx_ref->super);
+  _free_pipe(&leaf->super);
+  _free_pipe(&after_leaf->super);
+  _free_pipe(&secondary->super);
+}
+
+Test(logmpx, destination_failover_unreachable_destination_without_failover_continues_the_path)
+{
+  /* the same shape without flags(destination-failover): the destination
+   * never rejects, the rest of the path always sees the message */
+  FailoverMockPipe *leaf = _failover_mock_pipe_new(NULL, TRUE);
+  FailoverMockPipe *after_leaf = _failover_mock_pipe_new(NULL, FALSE);
+  LogMultiplexer *mpx_ref = log_multiplexer_new(NULL);
+
+  log_multiplexer_disable_delivery_propagation(mpx_ref);
+  log_pipe_init(&leaf->super);
+  log_pipe_init(&after_leaf->super);
+  log_multiplexer_add_next_hop(mpx_ref, &leaf->super);
+  log_pipe_append(&mpx_ref->super, &after_leaf->super);
+  cr_assert(log_pipe_init(&mpx_ref->super));
+
+  _queue_empty_message(&mpx_ref->super);
+  cr_assert_eq(leaf->captured_messages->len, 1);
+  cr_assert_eq(after_leaf->captured_messages->len, 1);
+
+  _free_pipe(&mpx_ref->super);
+  _free_pipe(&leaf->super);
+  _free_pipe(&after_leaf->super);
+}
+
 static void
 setup(void)
 {

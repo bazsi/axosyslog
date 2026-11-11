@@ -215,6 +215,22 @@ log_multiplexer_queue(LogPipe *s, LogMessage *msg, const LogPathOptions *path_op
       if (!delivered && path_options->matched)
         *path_options->matched = FALSE;
     }
+
+  /* A destination on a flags(destination-failover) path refused the
+   * message: the rest of this alternative (e.g. a filterx block following
+   * the destination in the same channel, updating a metric) must not see
+   * it, as it is going to be delivered by the next alternative instead.
+   * Stop here, the same way a non-matching filter would.
+   *
+   * With delivery_propagation, we act as a filtering element and
+   * our pipe_next is responsible for the outcome (see above), so this only
+   * applies when we dispatch to destinations. */
+  if (G_UNLIKELY(!delivered && path_options->destination_failover && !self->delivery_propagation
+                 && self->next_hops->len > 0))
+    {
+      log_msg_drop(msg, path_options, AT_PROCESSED);
+      return;
+    }
   log_pipe_forward_msg(s, msg, path_options);
 }
 
