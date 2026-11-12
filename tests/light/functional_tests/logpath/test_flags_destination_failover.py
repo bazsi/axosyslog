@@ -423,3 +423,56 @@ destination d_secondary_then_metric {
 
     syslog_ng.stop()
     assert not Path("after-primary.log").exists()
+
+
+def _assert_primary_delivers_without_failover(config, syslog_ng, port_allocator, primary_body):
+    config.add_preamble(
+        r"""
+destination d_primary {
+    channel {
+        %s
+        filterx { update_metric("primary_accepted_total"); };
+    };
+};
+""" % primary_body,
+    )
+
+    source = config.create_network_source(ip="localhost", port=port_allocator(), transport="tcp")
+    primary = _NamedDestinationReference("d_primary")
+    secondary = config.create_file_destination(file_name="secondary.log")
+    _create_failover_logpath(config, source, primary, secondary)
+
+    syslog_ng.start(config)
+
+    messages = _messages("primary")
+    source.write_logs(_syslog_lines(messages))
+    assert _read_lines("primary.log", NUM_MESSAGES)[-1].endswith(messages[-1])
+
+    samples = config.get_prometheus_samples([MetricFilter("syslogng_primary_accepted_total", {})])
+    assert [int(sample.value) for sample in samples] == [NUM_MESSAGES]
+
+    syslog_ng.stop()
+    assert not Path("secondary.log").exists()
+
+
+def test_destination_failover_destination_chained_after_a_successful_one_does_not_fail_over(config, syslog_ng, port_allocator):
+    # the unreachable tap follows a destination that already accepted the
+    # message: it buffers instead of rejecting, no duplicate in secondary
+    _assert_primary_delivers_without_failover(
+        config, syslog_ng, port_allocator,
+        r"""
+        destination { file("primary.log"); };
+        destination { file("missing-dir/tap.log"); };
+        """,
+    )
+
+
+def test_destination_failover_drivers_of_a_destination_block_are_equivalent(config, syslog_ng, port_allocator):
+    # one of the drivers of the same destination block accepting the
+    # message means it is delivered, the failover happens above it
+    _assert_primary_delivers_without_failover(
+        config, syslog_ng, port_allocator,
+        r"""
+        destination { file("missing-dir/unreachable.log"); file("primary.log"); };
+        """,
+    )

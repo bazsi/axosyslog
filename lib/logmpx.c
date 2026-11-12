@@ -139,6 +139,12 @@ log_multiplexer_queue(LogPipe *s, LogMessage *msg, const LogPathOptions *path_op
           if (G_UNLIKELY(i == self->failover_fallback))
             local_path_options.destination_failover = path_options->destination_failover;
 
+          /* once a next_hop accepted the message, it is delivered: the
+           * drivers of a destination are equivalent, the rest of them
+           * buffer instead of rejecting, failover is decided above us */
+          if (delivered)
+            local_path_options.destination_failover = FALSE;
+
           matched = TRUE;
           log_msg_add_ack(msg, &local_path_options);
           log_pipe_queue(next_hop, log_msg_ref(msg), &local_path_options);
@@ -225,10 +231,25 @@ log_multiplexer_queue(LogPipe *s, LogMessage *msg, const LogPathOptions *path_op
    * With delivery_propagation, we act as a filtering element and
    * our pipe_next is responsible for the outcome (see above), so this only
    * applies when we dispatch to destinations. */
-  if (G_UNLIKELY(!delivered && path_options->destination_failover && !self->delivery_propagation
+  if (G_UNLIKELY(path_options->destination_failover && !self->delivery_propagation
                  && self->next_hops->len > 0))
     {
-      log_msg_drop(msg, path_options, AT_PROCESSED);
+      if (!delivered)
+        {
+          log_msg_drop(msg, path_options, AT_PROCESSED);
+          return;
+        }
+
+      /* The destination accepted the message, so this alternative is
+       * the one delivering it: whatever follows on it (e.g. a second
+       * destination block chained after this one, tapping the output)
+       * buffers instead of rejecting, as failing over at this point would
+       * duplicate the message in the next alternative. */
+      LogPathOptions forward_path_options;
+
+      log_path_options_chain(&forward_path_options, path_options);
+      forward_path_options.destination_failover = FALSE;
+      log_pipe_forward_msg(s, msg, &forward_path_options);
       return;
     }
   log_pipe_forward_msg(s, msg, path_options);
