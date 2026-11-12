@@ -187,7 +187,7 @@ log_multiplexer_queue(LogPipe *s, LogMessage *msg, const LogPathOptions *path_op
    *
    *   - If we did not match (e.g.  delivered == FALSE), we may need to
    *   propagate this result to our parent by setting
-   *   (*path_options->matched) to FALSE.
+   *   (*path_options->matched) to FALSE, see log_path_options_mark_unmatched().
    *
    * In the cases of 1) and 2) we perform a filtering function and we want
    * to tell our parent that we did NOT match so it can attempt another
@@ -218,8 +218,8 @@ log_multiplexer_queue(LogPipe *s, LogMessage *msg, const LogPathOptions *path_op
 
   if (self->delivery_propagation)
     {
-      if (!delivered && path_options->matched)
-        *path_options->matched = FALSE;
+      if (!delivered)
+        log_path_options_mark_unmatched(path_options);
     }
   else if (G_UNLIKELY(path_options->destination_failover))
     {
@@ -231,8 +231,7 @@ log_multiplexer_queue(LogPipe *s, LogMessage *msg, const LogPathOptions *path_op
            * the destination in the same channel, updating a metric) must
            * not see it.  Stop here, the same way a non-matching filter
            * would. */
-          if (path_options->matched)
-            *path_options->matched = FALSE;
+          log_path_options_mark_unmatched(path_options);
           log_msg_drop(msg, path_options, AT_PROCESSED);
           return;
         }
