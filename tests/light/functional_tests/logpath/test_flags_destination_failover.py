@@ -400,8 +400,10 @@ destination d_unreachable_then_metric {
 };
 
 destination d_secondary_then_metric {
-    file("secondary.log");
-    filterx { update_metric("secondary_accepted_total"); };
+    channel {
+        destination { file("secondary.log"); };
+        filterx { update_metric("secondary_accepted_total"); };
+    };
 };
 """,
     )
@@ -419,7 +421,8 @@ destination d_secondary_then_metric {
 
     samples = config.get_prometheus_samples([MetricFilter("syslogng_secondary_accepted_total", {})])
     assert [int(sample.value) for sample in samples] == [NUM_MESSAGES]
-    assert config.get_prometheus_samples([MetricFilter("syslogng_primary_accepted_total", {})]) == []
+    samples = config.get_prometheus_samples([MetricFilter("syslogng_primary_accepted_total", {})])
+    assert all(int(sample.value) == 0 for sample in samples)
 
     syslog_ng.stop()
     assert not Path("after-primary.log").exists()
