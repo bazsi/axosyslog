@@ -216,32 +216,29 @@ log_multiplexer_queue(LogPipe *s, LogMessage *msg, const LogPathOptions *path_op
    * around us.
    */
 
-  if (self->delivery_propagation || path_options->destination_failover)
+  if (self->delivery_propagation)
     {
       if (!delivered && path_options->matched)
         *path_options->matched = FALSE;
     }
-
-  /* A destination on a flags(destination-failover) path refused the
-   * message: the rest of this alternative (e.g. a filterx block following
-   * the destination in the same channel, updating a metric) must not see
-   * it, as it is going to be delivered by the next alternative instead.
-   * Stop here, the same way a non-matching filter would.
-   *
-   * With delivery_propagation, we act as a filtering element and
-   * our pipe_next is responsible for the outcome (see above), so this only
-   * applies when we dispatch to destinations. */
-  if (G_UNLIKELY(path_options->destination_failover && !self->delivery_propagation
-                 && self->next_hops->len > 0))
+  else if (G_UNLIKELY(path_options->destination_failover))
     {
       if (!delivered)
         {
+          /* A destination refused the message: fail over to the next
+           * alternative, and as the message is going to be delivered
+           * there, the rest of this one (e.g. a filterx block following
+           * the destination in the same channel, updating a metric) must
+           * not see it.  Stop here, the same way a non-matching filter
+           * would. */
+          if (path_options->matched)
+            *path_options->matched = FALSE;
           log_msg_drop(msg, path_options, AT_PROCESSED);
           return;
         }
 
-      /* The destination accepted the message, so this alternative is
-       * the one delivering it: whatever follows on it (e.g. a second
+      /* A destination accepted the message, so this alternative is the
+       * one delivering it: whatever follows on it (e.g. a second
        * destination block chained after this one, tapping the output)
        * buffers instead of rejecting, as failing over at this point would
        * duplicate the message in the next alternative. */
