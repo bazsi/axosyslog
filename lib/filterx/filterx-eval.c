@@ -504,7 +504,7 @@ _is_xref_around_pinned_value(FilterXObject *value)
 }
 
 static FilterXObject *
-_dup_retain_value(FilterXObject *value, gpointer user_data)
+_dup_retain_value(FilterXObject *value)
 {
   if (!value)
     return NULL;
@@ -551,6 +551,18 @@ filterx_eval_context_dup(FilterXEvalContext *context)
 {
   g_assert(context == filterx_eval_get_context());
 
+  /* Write what the evaluation changed so far back to the message, the same
+   * way a fork does (filterx_eval_prepare_for_fork()): from here on the
+   * message holds every message-tied variable, so the snapshot only has to
+   * take a clone of it instead of carrying those variables (and their
+   * assigned/unset state) over one by one.  This has to happen here, in the
+   * live context: the sync allocates, and stores into the live scope. */
+  if (context->msg)
+    {
+      filterx_scope_set_dirty(context->scope);
+      filterx_scope_sync(context->scope, &context->msg, context->path_options);
+    }
+
   FilterXEvalContext *new_context = g_new0(FilterXEvalContext, 1);
 
   /* standalone context: not linked to where it was taken from */
@@ -593,11 +605,11 @@ filterx_eval_context_dup(FilterXEvalContext *context)
   filterx_eval_set_context(new_context);
 
   _pin_stashes(new_context, context);
-  new_context->scope = filterx_scope_dup(context->scope, _dup_retain_value, NULL);
+  new_context->scope = filterx_scope_dup(context->scope, _dup_retain_value);
   /* the scope owns the only reference to the message, context->msg is
    * just a borrowed convenience pointer, mirroring filterx_eval_begin_context() */
   new_context->msg = new_context->scope->msg;
-  new_context->current_frame_meta = _dup_retain_value(context->current_frame_meta, NULL);
+  new_context->current_frame_meta = _dup_retain_value(context->current_frame_meta);
 
   filterx_eval_set_context(context);
 

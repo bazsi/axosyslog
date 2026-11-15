@@ -59,7 +59,7 @@ typedef gboolean (*FilterXScopeForeachFunc)(FilterXVariable *variable, gpointer 
  * that would not survive the duplication (e.g.  a thread specific
  * allocator, or config reload).  Must return an independent, owned
  * reference. */
-typedef FilterXObject *(*FilterXScopeValueRetainFunc)(FilterXObject *value, gpointer user_data);
+typedef FilterXObject *(*FilterXScopeValueRetainFunc)(FilterXObject *value);
 
 void filterx_scope_sync(FilterXScope *self, LogMessage **pmsg, const LogPathOptions *path_options);
 
@@ -80,20 +80,23 @@ void filterx_scope_free(FilterXScope *self);
 
 /* Duplicates @self into an independent copy that is safe to keep around
  * (and hand to another thread) past the lifetime of @self, e.g. to resume
- * evaluation later. The result is @self's own variables under @self's own
- * layout (so every scope_var_idx the compiler assigned against @self
- * stays valid), optionally parented onto a second, frozen scope holding a
- * flattened snapshot of the message-tied and declared floating variables
- * visible through @self's ancestor chain (plain floating variables don't
- * survive a scope boundary by design, see filterx_variable_is_declared()).
- * Message-tied variables that are in sync with the message are left out
- * altogether: the copy holds a copy-on-write clone of the message as it
- * is at this point and pulls them from there on demand, only assigned or
- * changed ones are carried over.
+ * evaluation later.
+ *
+ * @self must be in sync with its message (filterx_scope_sync()): the copy
+ * holds a copy-on-write clone of the message as it is at this point and
+ * pulls message-tied variables from there on demand, none of them are
+ * carried over.
+ *
+ * The result is @self's own floating variables under @self's own layout (so
+ * every scope_var_idx the compiler assigned against @self stays valid),
+ * optionally parented onto a second scope holding a flattened snapshot of
+ * the declared floating variables visible through @self's ancestor chain
+ * (plain floating variables don't survive a scope boundary by design, see
+ * filterx_variable_is_declared()).
  * Each scope in the returned chain owns its own FilterXScopeVariableLayout;
  * free the result with filterx_scope_free_dup(), not a bare
  * filterx_scope_free(). */
-FilterXScope *filterx_scope_dup(FilterXScope *self, FilterXScopeValueRetainFunc retain, gpointer user_data);
+FilterXScope *filterx_scope_dup(FilterXScope *self, FilterXScopeValueRetainFunc retain);
 
 /* The matching free for a filterx_scope_dup() result -- see its comment. */
 void filterx_scope_free_dup(FilterXScope *self);

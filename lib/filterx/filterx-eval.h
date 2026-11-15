@@ -120,7 +120,12 @@ void filterx_eval_freeze_object(FilterXObject **object);
  *
  * Takes a full, self contained snapshot of @context: its scope (and the
  * scope's entire parent chain) with all of its variables/values, and
- * current_frame_meta.  Every retained value is decoupled from the thread
+ * current_frame_meta.
+ *
+ * The message is synced first (filterx_scope_sync(), which may replace
+ * @context->msg with a writable clone, just like at a fork): everything
+ * message-tied is then in the message, the snapshot takes a clone of that
+ * and carries the floating variables only.  Every retained value is decoupled from the thread
  * specific allocator and from the current configuration (see
  * FX_RETAIN_SNAPSHOT): an independent, owned copy, unless a stash the
  * snapshot pins keeps it alive.

@@ -980,7 +980,19 @@ _count_variable(FilterXVariable *variable, gpointer user_data)
   return TRUE;
 }
 
-Test(filterx_retain, snapshot_carries_a_whiteout_and_the_resumed_sync_unsets_the_field)
+/* The snapshot syncs the live scope to the message first, the way a fork
+ * does, and takes a clone of the message: message-tied variables are never
+ * carried over, whatever state they were in. */
+static const gchar *
+_get_message_value(LogMessage *msg, FilterXVariableHandle handle)
+{
+  LogMessageValueType type;
+
+  /* log_msg_is_value_set() stays TRUE for an unset entry, so look at the value */
+  return log_msg_get_value_if_set_with_type(msg, filterx_variable_handle_to_nv_handle(handle), NULL, &type);
+}
+
+Test(filterx_retain, snapshot_syncs_an_unset_field_to_the_message_instead_of_carrying_a_whiteout)
 {
   LogMessage *msg = filterx_eval_get_context()->msg;
   log_msg_set_value_by_name_with_type(msg, "snapunset", "to-be-unset", -1, LM_VT_STRING);
@@ -995,40 +1007,34 @@ Test(filterx_retain, snapshot_carries_a_whiteout_and_the_resumed_sync_unsets_the
 
   FilterXEvalContext *dup = filterx_eval_context_dup(filterx_eval_get_context());
 
-  FilterXVariable *dv = filterx_scope_lookup_variable(dup->scope, handle, 0);
-  cr_assert_not_null(dv, "the whiteout was not carried into the snapshot");
-  cr_assert(filterx_variable_is_assigned(dv));
-  cr_assert_not(filterx_variable_is_set(dv));
+  gint num_variables = 0;
+  cr_assert(filterx_scope_foreach_variable_readonly(dup->scope, _count_variable, &num_variables));
+  cr_assert_eq(num_variables, 0, "a message-tied variable was carried into the snapshot");
+  cr_assert_null(dup->scope->parent_scope);
 
-  /* the snapshot's message still has the field, the live sync never ran
-   * on it; the resumed sync is what unsets it.  log_msg_is_value_set()
-   * stays TRUE for an unset entry, so look at the value */
-  LogMessage *snap_msg = log_msg_ref(dup->scope->msg);
-  LogMessageValueType type;
-  cr_assert_not_null(log_msg_get_value_if_set_with_type(snap_msg, filterx_variable_get_nv_handle(dv), NULL, &type));
-  LogPathOptions path_options = LOG_PATH_OPTIONS_INIT;
-  filterx_scope_sync(dup->scope, &snap_msg, &path_options);
-  cr_assert_null(log_msg_get_value_if_set_with_type(snap_msg, filterx_variable_get_nv_handle(dv), NULL, &type),
-                 "the resumed sync did not unset the field");
-  log_msg_unref(snap_msg);
+  /* the unset happened in the message, both the live one and the snapshot's */
+  cr_assert_null(_get_message_value(filterx_eval_get_context()->msg, handle), "the live message was not synced");
+  cr_assert_null(_get_message_value(dup->scope->msg, handle), "the snapshot's message still has the field");
 
   filterx_eval_context_free_dup(dup);
   filterx_scope_variable_layout_free(layout);
 }
 
-Test(filterx_retain, snapshot_carries_the_whiteout_of_an_earlier_block_the_current_one_never_touched)
+Test(filterx_retain, snapshot_syncs_the_changes_of_an_earlier_block_the_current_one_never_touched)
 {
   LogMessage *msg = filterx_eval_get_context()->msg;
   log_msg_set_value_by_name_with_type(msg, "snapunset", "to-be-unset", -1, LM_VT_STRING);
 
   /* the earlier block unsets the field; filterx pipes chain their scopes,
-   * so its scope is not synced before the next block runs */
+   * so its scope is not synced before the next block runs.  Finishing a
+   * block leaves its scope dirty, see filterx_eval_exec(). */
   FilterXVariableHandle handle = filterx_map_varname_to_handle("snapunset", FX_VAR_MESSAGE_TIED);
   FilterXScopeVariableLayout *earlier_layout = filterx_scope_variable_layout_new_from_handles(&handle, 1);
   FilterXScope *earlier_scope = filterx_scope_new(NULL, earlier_layout);
   filterx_scope_set_message(earlier_scope, msg);
   FilterXVariable *v = filterx_scope_register_variable(earlier_scope, FX_VAR_MESSAGE_TIED, handle, 0);
   filterx_scope_unset_variable(earlier_scope, v);
+  filterx_scope_set_dirty(earlier_scope);
 
   /* the current block never touches the variable */
   FilterXScopeVariableLayout *layout = filterx_scope_variable_layout_new_from_handles(NULL, 0);
@@ -1036,20 +1042,9 @@ Test(filterx_retain, snapshot_carries_the_whiteout_of_an_earlier_block_the_curre
 
   FilterXEvalContext *dup = filterx_eval_context_dup(filterx_eval_get_context());
 
-  cr_assert_not_null(dup->scope->parent_scope, "the whiteout of the earlier block was not carried into the snapshot");
-  FilterXVariable *dv = filterx_scope_lookup_variable(dup->scope->parent_scope, handle, 0);
-  cr_assert_not_null(dv);
-  cr_assert(filterx_variable_is_assigned(dv));
-  cr_assert_not(filterx_variable_is_set(dv));
-
-  LogMessage *snap_msg = log_msg_ref(dup->scope->msg);
-  LogMessageValueType type;
-  cr_assert_not_null(log_msg_get_value_if_set_with_type(snap_msg, filterx_variable_get_nv_handle(dv), NULL, &type));
-  LogPathOptions path_options = LOG_PATH_OPTIONS_INIT;
-  filterx_scope_sync(dup->scope, &snap_msg, &path_options);
-  cr_assert_null(log_msg_get_value_if_set_with_type(snap_msg, filterx_variable_get_nv_handle(dv), NULL, &type),
-                 "the resumed sync did not unset the field");
-  log_msg_unref(snap_msg);
+  cr_assert_null(dup->scope->parent_scope, "a message-tied variable of an earlier block was carried into the snapshot");
+  cr_assert_null(_get_message_value(filterx_eval_get_context()->msg, handle), "the live message was not synced");
+  cr_assert_null(_get_message_value(dup->scope->msg, handle), "the snapshot's message still has the field");
 
   filterx_eval_context_free_dup(dup);
   set_libtest_filterx_scope(filterx_scope_new(NULL, NULL));
@@ -1058,7 +1053,7 @@ Test(filterx_retain, snapshot_carries_the_whiteout_of_an_earlier_block_the_curre
   filterx_scope_variable_layout_free(earlier_layout);
 }
 
-Test(filterx_retain, snapshot_skips_message_tied_variables_that_are_in_sync_with_the_message)
+Test(filterx_retain, snapshot_syncs_an_assigned_field_and_reads_it_back_from_its_message)
 {
   LogMessage *msg = filterx_eval_get_context()->msg;
   log_msg_set_value_by_name_with_type(msg, "snapread", "from-the-message", -1, LM_VT_STRING);
@@ -1076,7 +1071,7 @@ Test(filterx_retain, snapshot_skips_message_tied_variables_that_are_in_sync_with
   cr_assert_not(filterx_variable_is_assigned(v));
   assert_object_str_equals(filterx_variable_borrow_value(v), "from-the-message");
 
-  /* $snapwrite is assigned to: only the scope knows the new value until the next sync */
+  /* $snapwrite is assigned to: only the scope knows the new value until the sync */
   v = filterx_scope_register_variable(scope, FX_VAR_MESSAGE_TIED, write_handle, 1);
   FilterXObject *new_value = filterx_string_new("assigned-in-scope", -1);
   filterx_scope_set_variable(scope, v, &new_value, TRUE);
@@ -1084,21 +1079,24 @@ Test(filterx_retain, snapshot_skips_message_tied_variables_that_are_in_sync_with
 
   FilterXEvalContext *dup = filterx_eval_context_dup(filterx_eval_get_context());
 
-  /* only the assigned one was carried over */
+  /* neither was carried over ... */
   gint num_variables = 0;
   cr_assert(filterx_scope_foreach_variable_readonly(dup->scope, _count_variable, &num_variables));
-  cr_assert_eq(num_variables, 1);
-
-  FilterXVariable *dv = filterx_scope_lookup_variable(dup->scope, write_handle, 1);
-  cr_assert_not_null(dv);
-  cr_assert(filterx_variable_is_assigned(dv));
-  assert_object_str_equals(filterx_variable_borrow_value(dv), "assigned-in-scope");
-
-  /* the other one is not there, and comes back from the snapshot's message
-   * the moment the resumed evaluation registers it */
+  cr_assert_eq(num_variables, 0);
   cr_assert_null(filterx_scope_lookup_variable(dup->scope, read_handle, 0));
-  dv = filterx_scope_register_variable(dup->scope, FX_VAR_MESSAGE_TIED, read_handle, 0);
+  cr_assert_null(filterx_scope_lookup_variable(dup->scope, write_handle, 1));
+
+  /* ... the live variable is still there for the rest of the block ... */
+  v = filterx_scope_lookup_variable(scope, write_handle, 1);
+  cr_assert_not_null(v);
+  assert_object_str_equals(filterx_variable_borrow_value(v), "assigned-in-scope");
+
+  /* ... and both come back from the snapshot's message the moment the
+   * resumed evaluation registers them */
+  FilterXVariable *dv = filterx_scope_register_variable(dup->scope, FX_VAR_MESSAGE_TIED, read_handle, 0);
   assert_object_str_equals(filterx_variable_borrow_value(dv), "from-the-message");
+  dv = filterx_scope_register_variable(dup->scope, FX_VAR_MESSAGE_TIED, write_handle, 1);
+  assert_object_str_equals(filterx_variable_borrow_value(dv), "assigned-in-scope");
 
   filterx_eval_context_free_dup(dup);
   filterx_scope_variable_layout_free(layout);

@@ -416,90 +416,59 @@ filterx_scope_free(FilterXScope *self)
   g_free(self);
 }
 
-typedef struct _FilterXScopeVariableSnapshot
+/*
+ * TRUE if a snapshot of @self has to carry @variable.
+ *
+ * Message-tied variables are never carried: the scope is in sync with its
+ * message when the snapshot is taken (see filterx_scope_dup()), so they hold
+ * nothing the message does not.  The snapshot has a clone of the message,
+ * and a read through it simply pulls the value from there again
+ * (filterx_scope_register_variable()).
+ */
+static inline gboolean
+_variable_goes_into_snapshot(FilterXScope *self, FilterXVariable *variable, gboolean declared_only)
 {
-  FilterXVariableHandle handle;
-  FilterXVariableType variable_type;
-  guint16 assigned;
-  FilterXObject *value;
-} FilterXScopeVariableSnapshot;
+  if (!variable->variable_type)
+    return FALSE;
 
-typedef struct _FilterXScopeDupCollector
-{
-  GArray *snapshots;
-  FilterXScopeValueRetainFunc retain;
-  gpointer user_data;
-  /* if TRUE, plain (undeclared) floating variables are skipped: they are
-   * scoped to a single generation by design and were never meant to
-   * survive a scope boundary, unlike declared floating or message-tied
-   * ones (see filterx_variable_is_declared()/_validate_variable()) */
-  gboolean declared_and_message_tied_only;
-} FilterXScopeDupCollector;
-
-static gboolean
-_collect_variable_for_dup(FilterXVariable *variable, gpointer user_data)
-{
-  FilterXScopeDupCollector *collector = (FilterXScopeDupCollector *) user_data;
-
-  if (collector->declared_and_message_tied_only &&
-      !filterx_variable_is_declared(variable) && !filterx_variable_is_message_tied(variable))
-    return TRUE;
-
-  /* A message-tied variable that was neither assigned to nor changed in
-   * place holds nothing the message does not: the snapshot keeps a
-   * reference on the message, and a read through the duplicate simply
-   * pulls the value from there again (filterx_scope_register_variable()).
-   * The same condition filterx_scope_sync() uses to skip a variable, so a
-   * variable it would write back is snapshotted -- including a whiteout,
-   * i.e.  an unset one (NULL value, assigned). */
-  if (filterx_variable_is_message_tied(variable) &&
-      !filterx_variable_is_assigned(variable) &&
-      variable->value && !filterx_object_is_dirty(variable->value))
-    return TRUE;
-
-  FilterXScopeVariableSnapshot snapshot =
-  {
-    .handle = variable->handle,
-    .variable_type = variable->variable_type,
-    .assigned = variable->assigned,
-    .value = collector->retain(variable->value, collector->user_data),
-  };
-  g_array_append_val(collector->snapshots, snapshot);
-  return TRUE;
-}
-
-/* consumes (unrefs) every snapshot value it doesn't end up placing */
-static FilterXScope *
-_dup_scope_from_snapshots(FilterXScope *parent, LogMessage *msg, FilterXScopeVariableLayout *layout, GArray *snapshots)
-{
-  FilterXScope *new_scope = filterx_scope_new(parent, layout);
-  if (msg)
-    filterx_scope_set_message(new_scope, msg);
-
-  for (guint32 i = 0; i < snapshots->len; i++)
+  if (filterx_variable_is_message_tied(variable))
     {
-      FilterXScopeVariableSnapshot *snapshot = &g_array_index(snapshots, FilterXScopeVariableSnapshot, i);
-      gint idx = filterx_scope_variable_layout_get_index(layout, snapshot->handle);
-      if (idx < 0)
-        {
-          filterx_object_unref(snapshot->value);
-          continue;
-        }
-
-      FilterXVariable *v = &new_scope->variables[idx];
-      filterx_variable_init_instance(v, snapshot->variable_type, snapshot->handle);
-      new_scope->variables_used++;
-
-      if (filterx_variable_is_message_tied(v))
-        new_scope->syncable = TRUE;
-
-      FilterXObject *value = snapshot->value;
-      FilterXGenCounter generation = filterx_variable_is_message_tied(v) ? new_scope->msg->generation : new_scope->generation;
-      filterx_variable_set_value(v, value ? &value : NULL, snapshot->assigned, generation);
-      filterx_object_unref(value);
+#if SYSLOG_NG_ENABLE_DEBUG
+      /* NOTE: we validate against @self */
+      if (_validate_variable(self, variable))
+        g_assert(("snapshotting a scope that is not in sync with its message" &&
+                  !filterx_variable_is_assigned(variable) &&
+                  !(variable->value && filterx_object_is_dirty(variable->value))));
+#endif
+      return FALSE;
     }
 
-  return new_scope;
+  if (!variable->value)
+    return FALSE;
+
+  /* plain (undeclared) floating variables are scoped to a single generation
+   * by design and were never meant to survive a scope boundary, unlike
+   * declared ones (see filterx_variable_is_declared()/_validate_variable()) */
+  if (declared_only && !filterx_variable_is_declared(variable))
+    return FALSE;
+
+  /* NOTE: we validate against @self */
+  return _validate_variable(self, variable);
+}
+
+static void
+_dup_variable(FilterXScope *new_scope, FilterXVariable *variable, FilterXScopeValueRetainFunc retain)
+{
+  gint idx = filterx_scope_variable_layout_get_index(new_scope->layout, variable->handle);
+  g_assert(idx >= 0);
+
+  FilterXVariable *v = &new_scope->variables[idx];
+  filterx_variable_init_instance(v, variable->variable_type, variable->handle);
+  new_scope->variables_used++;
+
+  FilterXObject *value = retain(variable->value);
+  filterx_variable_set_value(v, &value, variable->assigned, new_scope->generation);
+  filterx_object_unref(value);
 }
 
 static FilterXScopeVariableLayout *
@@ -509,36 +478,15 @@ _layout_copy(FilterXScopeVariableLayout *source)
                                                         source ? source->num_variables : 0);
 }
 
-static FilterXScopeVariableLayout *
-_layout_from_snapshot_handles(GArray *snapshots)
+/* the declared variables visible through @self's parent chain, flattened
+ * into a single scope; NULL if there are none */
+static FilterXScope *
+_dup_ancestors(FilterXScope *self, FilterXScopeValueRetainFunc retain)
 {
-  guint32 n = snapshots->len;
-  FilterXVariableHandle *handles = NULL;
-  if (n > 0)
-    {
-      handles = g_new(FilterXVariableHandle, n);
-      for (guint32 i = 0; i < n; i++)
-        handles[i] = g_array_index(snapshots, FilterXScopeVariableSnapshot, i).handle;
-    }
-  FilterXScopeVariableLayout *layout = filterx_scope_variable_layout_new_from_handles(handles, n);
-  g_free(handles);
-  return layout;
-}
-
-/* an unset message-tied variable: no value, but something the sync writes
- * back (see filterx_scope_sync()), so a snapshot has to carry it */
-static inline gboolean
-_variable_is_whiteout(FilterXVariable *variable)
-{
-  return !variable->value && filterx_variable_is_message_tied(variable) && filterx_variable_is_assigned(variable);
-}
-
-/* filterx_scope_foreach_variable_readonly() skips the variables without a
- * value, whiteouts included, so the ancestors are walked here */
-static void
-_collect_ancestor_variables_for_dup(FilterXScope *self, FilterXScopeDupCollector *collector)
-{
+  GPtrArray *variables = g_ptr_array_new();
+  GArray *handles = g_array_new(FALSE, FALSE, sizeof(FilterXVariableHandle));
   GHashTable *already_found = g_hash_table_new(g_direct_hash, g_direct_equal);
+  FilterXScope *ancestor_scope = NULL;
 
   for (FilterXScope *scope = self->parent_scope; scope; scope = scope->parent_scope)
     {
@@ -546,25 +494,39 @@ _collect_ancestor_variables_for_dup(FilterXScope *self, FilterXScopeDupCollector
         {
           FilterXVariable *variable = &scope->variables[i];
 
-          if (!variable->variable_type)
+          if (!_variable_goes_into_snapshot(self, variable, TRUE))
             continue;
-          if (!variable->value && !_variable_is_whiteout(variable))
-            continue;
-          /* NOTE: we validate against @self */
-          if (!_validate_variable(self, variable))
-            continue;
-          if (g_hash_table_contains(already_found, GSIZE_TO_POINTER(variable->handle)))
+          /* the closest scope wins */
+          if (!g_hash_table_add(already_found, GSIZE_TO_POINTER(variable->handle)))
             continue;
 
-          _collect_variable_for_dup(variable, collector);
-          g_hash_table_add(already_found, GSIZE_TO_POINTER(variable->handle));
+          g_ptr_array_add(variables, variable);
+          g_array_append_val(handles, variable->handle);
         }
     }
 
+  if (variables->len > 0)
+    {
+      FilterXScopeVariableLayout *layout =
+        filterx_scope_variable_layout_new_from_handles((FilterXVariableHandle *) handles->data, handles->len);
+
+      ancestor_scope = filterx_scope_new(NULL, layout);
+      for (guint i = 0; i < variables->len; i++)
+        _dup_variable(ancestor_scope, g_ptr_array_index(variables, i), retain);
+    }
+
   g_hash_table_destroy(already_found);
+  g_array_free(handles, TRUE);
+  g_ptr_array_free(variables, TRUE);
+  return ancestor_scope;
 }
 
 /*
+ * @self has to be in sync with its message (filterx_scope_sync()), see
+ * filterx_eval_context_dup() for the one caller taking care of that.  That
+ * leaves the floating variables for the duplicate to carry, everything
+ * message-tied is in the message, of which the duplicate gets a clone.
+ *
  * A single flattened scope cannot represent everything a duplicate needs:
  * @self's own variables must keep @self's exact layout, so every
  * scope_var_idx the compiler assigned against it (including for variables
@@ -574,72 +536,44 @@ _collect_ancestor_variables_for_dup(FilterXScope *self, FilterXScopeDupCollector
  * preserve and are only ever reached via the generic handle-based lookup.
  * Two scopes, chained together, cover both:
  *
- *   1) an ancestor scope: a flattened snapshot of every message-tied or
- *      declared floating variable visible through @self's parent chain.
- *      Plain (undeclared) floating variables are intentionally excluded:
- *      they are scoped to a single generation by design and were never
- *      meant to survive a scope boundary. An assignment made in an earlier
- *      block reaches the message at the next syncing pipe, which the
- *      duplicate never passes, so this scope is dirty: a resumed
- *      evaluation syncs it along with (2).
+ *   1) an ancestor scope: a flattened snapshot of every declared floating
+ *      variable visible through @self's parent chain.  Plain (undeclared)
+ *      floating variables are intentionally excluded: they are scoped to a
+ *      single generation by design and were never meant to survive a scope
+ *      boundary.
  *
- *   2) the "own" scope (returned): an exact copy of @self, using @self's
- *      own layout, parented onto (1).
+ *   2) the "own" scope (returned): a copy of @self's floating variables,
+ *      using @self's own layout, parented onto (1).
  */
 FilterXScope *
-filterx_scope_dup(FilterXScope *self, FilterXScopeValueRetainFunc retain, gpointer user_data)
+filterx_scope_dup(FilterXScope *self, FilterXScopeValueRetainFunc retain)
 {
   /* the message as it is right now: the live path goes on writing (and
    * bumping the generation of) the original */
   LogPathOptions path_options = LOG_PATH_OPTIONS_INIT_NOACK;
   LogMessage *msg = self->msg ? log_msg_clone_cow(self->msg, &path_options) : NULL;
 
-  FilterXScopeDupCollector own_collector =
-  {
-    .snapshots = g_array_new(FALSE, FALSE, sizeof(FilterXScopeVariableSnapshot)),
-    .retain = retain,
-    .user_data = user_data,
-    .declared_and_message_tied_only = FALSE,
-  };
+  FilterXScope *ancestor_scope = self->parent_scope ? _dup_ancestors(self, retain) : NULL;
+  if (ancestor_scope && msg)
+    filterx_scope_set_message(ancestor_scope, msg);
+
+  FilterXScope *new_scope = filterx_scope_new(ancestor_scope, _layout_copy(self->layout));
+  if (msg)
+    {
+      filterx_scope_set_message(new_scope, msg);
+      log_msg_unref(msg);
+    }
+
   for (guint32 i = 0; i < self->variables_size; i++)
     {
       FilterXVariable *variable = &self->variables[i];
-      if (!variable->variable_type)
-        continue;
-      if (!variable->value && !_variable_is_whiteout(variable))
-        continue;
-      if (!_validate_variable(self, variable))
-        continue;
-      _collect_variable_for_dup(variable, &own_collector);
+
+      if (_variable_goes_into_snapshot(self, variable, FALSE))
+        _dup_variable(new_scope, variable, retain);
     }
 
-  FilterXScope *ancestor_scope = NULL;
-  if (self->parent_scope)
-    {
-      FilterXScopeDupCollector ancestor_collector =
-      {
-        .snapshots = g_array_new(FALSE, FALSE, sizeof(FilterXScopeVariableSnapshot)),
-        .retain = retain,
-        .user_data = user_data,
-        .declared_and_message_tied_only = TRUE,
-      };
-      _collect_ancestor_variables_for_dup(self, &ancestor_collector);
-
-      if (ancestor_collector.snapshots->len > 0)
-        {
-          FilterXScopeVariableLayout *ancestor_layout = _layout_from_snapshot_handles(ancestor_collector.snapshots);
-          ancestor_scope = _dup_scope_from_snapshots(NULL, msg, ancestor_layout, ancestor_collector.snapshots);
-          filterx_scope_set_dirty(ancestor_scope);
-        }
-      g_array_free(ancestor_collector.snapshots, TRUE);
-    }
-
-  FilterXScopeVariableLayout *own_layout = _layout_copy(self->layout);
-  FilterXScope *new_scope = _dup_scope_from_snapshots(ancestor_scope, msg, own_layout, own_collector.snapshots);
-  new_scope->dirty = TRUE;
-  g_array_free(own_collector.snapshots, TRUE);
-  log_msg_unref(msg);
-
+  /* a resumed evaluation syncs what it changes */
+  filterx_scope_set_dirty(new_scope);
   return new_scope;
 }
 

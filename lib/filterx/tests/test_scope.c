@@ -166,7 +166,7 @@ Test(filterx_scope, test_scope_foreach_variable_with_parent_scope)
 }
 
 static FilterXObject *
-_retain_ref(FilterXObject *value, gpointer user_data)
+_retain_ref(FilterXObject *value)
 {
   return filterx_object_ref(value);
 }
@@ -223,10 +223,19 @@ Test(filterx_scope, test_scope_dup_flattens_parent_chain_into_an_independent_cop
   filterx_scope_set_variable(parent, v, &o, TRUE);
   filterx_object_unref(o);
 
-  /* child never touches either variable directly, they only live in the parent scope */
+  /* child never touches either variable directly, they only live in the
+   * parent scope, which is dirty the way a finished block leaves it */
+  filterx_scope_set_dirty(parent);
   FilterXScope *child = filterx_scope_new(parent, l);
 
-  FilterXScope *dup = filterx_scope_dup(child, _retain_ref, NULL);
+  /* a scope has to be in sync with its message to be duplicated */
+  LogPathOptions path_options = LOG_PATH_OPTIONS_INIT;
+  filterx_scope_sync(child, &msg, &path_options);
+
+  FilterXScope *dup = filterx_scope_dup(child, _retain_ref);
+  cr_assert_not_null(log_msg_get_value_if_set_with_type(dup->msg, filterx_variable_handle_to_nv_handle(msg_tied_handle),
+                                                        NULL, NULL),
+                     "the message-tied variable did not reach the duplicate's message");
 
   /* tear down the originals: the dup must be fully independent of them */
   filterx_scope_free(child);
@@ -240,8 +249,8 @@ Test(filterx_scope, test_scope_dup_flattens_parent_chain_into_an_independent_cop
     .floating_handle = floating_handle,
   };
   cr_assert(filterx_scope_foreach_variable_readonly(dup, _check_dup_variable, &state));
-  cr_assert_eq(state.num_variables_seen, 2);
-  cr_assert(state.msg_tied_seen);
+  cr_assert_eq(state.num_variables_seen, 1);
+  cr_assert_not(state.msg_tied_seen, "a message-tied variable was carried over, the message has it");
   cr_assert(state.floating_seen);
 
   filterx_scope_free_dup(dup);
@@ -278,9 +287,9 @@ _check_ancestor_dup_variable(FilterXVariable *variable, gpointer user_data)
  * different, unrelated filterx{} block chained before it) -- exercising
  * filterx_scope_dup()'s two-scope split: @child's own layout must stay
  * exactly its own (so scope_var_idx values compiled against it remain
- * valid), while message-tied/declared floating variables inherited from
- * @parent land in a separate, flattened ancestor scope reachable only via
- * handle-based lookup. A plain (undeclared) floating variable in @parent
+ * valid), while declared floating variables inherited from @parent land in
+ * a separate, flattened ancestor scope reachable only via handle-based
+ * lookup (message-tied ones are in the message, which is synced first). A plain (undeclared) floating variable in @parent
  * must not survive the boundary at all. */
 Test(filterx_scope, test_scope_dup_splits_into_own_and_flattened_ancestor_scopes)
 {
@@ -314,9 +323,17 @@ Test(filterx_scope, test_scope_dup_splits_into_own_and_flattened_ancestor_scopes
   FilterXVariableHandle child_handles[] = { own_handle };
   FilterXScopeVariableLayout *child_layout =
     filterx_scope_variable_layout_new_from_handles(child_handles, G_N_ELEMENTS(child_handles));
+  filterx_scope_set_dirty(parent);
   FilterXScope *child = filterx_scope_new(parent, child_layout);
 
-  FilterXScope *dup = filterx_scope_dup(child, _retain_ref, NULL);
+  /* a scope has to be in sync with its message to be duplicated */
+  LogPathOptions path_options = LOG_PATH_OPTIONS_INIT;
+  filterx_scope_sync(child, &msg, &path_options);
+
+  FilterXScope *dup = filterx_scope_dup(child, _retain_ref);
+  cr_assert_not_null(log_msg_get_value_if_set_with_type(dup->msg, filterx_variable_handle_to_nv_handle(msg_tied_handle),
+                                                        NULL, NULL),
+                     "the message-tied variable did not reach the duplicate's message");
 
   /* tear down the originals: the dup must be fully independent of them */
   filterx_scope_free(child);
@@ -338,8 +355,8 @@ Test(filterx_scope, test_scope_dup_splits_into_own_and_flattened_ancestor_scopes
     .plain_handle = plain_handle,
   };
   cr_assert(filterx_scope_foreach_variable_readonly(dup, _check_ancestor_dup_variable, &state));
-  cr_assert_eq(state.num_variables_seen, 2);
-  cr_assert(state.msg_tied_seen);
+  cr_assert_eq(state.num_variables_seen, 1);
+  cr_assert_not(state.msg_tied_seen, "a message-tied variable was carried over, the message has it");
   cr_assert(state.declared_seen);
 
   filterx_scope_free_dup(dup);
