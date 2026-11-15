@@ -125,10 +125,11 @@ void filterx_eval_freeze_object(FilterXObject **object);
  * The message is synced first (filterx_scope_sync(), which may replace
  * @context->msg with a writable clone, just like at a fork): everything
  * message-tied is then in the message, the snapshot takes a clone of that
- * and carries the floating variables only.  Every retained value is decoupled from the thread
- * specific allocator and from the current configuration (see
- * FX_RETAIN_SNAPSHOT): an independent, owned copy, unless a stash the
- * snapshot pins keeps it alive.
+ * and carries the floating variables only.
+ *
+ * Every retained value is decoupled from the thread specific allocator and
+ * from the current configuration (see FX_RETAIN_SNAPSHOT): an independent,
+ * owned copy, unless a stash the snapshot pins keeps it alive.
  *
  * The result's weak_refs start out with those stash references (see
  * _pin_stashes()), and cloning a recursive mutable structure (a dict
