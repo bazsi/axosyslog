@@ -64,6 +64,7 @@
 #include "filterx/object-null.h"
 #include "filterx/object-dict.h"
 #include "filterx/object-list.h"
+#include "filterx/object-tuple.h"
 #include "filterx/object-message-value.h"
 #include "filterx/object-metrics-labels.h"
 
@@ -78,8 +79,6 @@
 static const FilterXEvalRetainGoal all_goals[] =
 {
   FX_RETAIN_UNTIL_FINAL_DELIVERY,
-  FX_RETAIN_UNTIL_RELOAD,
-  FX_RETAIN_DECOUPLE_CONFIG,
   FX_RETAIN_SNAPSHOT,
 };
 
@@ -90,10 +89,6 @@ _goal_name(FilterXEvalRetainGoal goal)
     {
     case FX_RETAIN_UNTIL_FINAL_DELIVERY:
       return "FX_RETAIN_UNTIL_FINAL_DELIVERY";
-    case FX_RETAIN_UNTIL_RELOAD:
-      return "FX_RETAIN_UNTIL_RELOAD";
-    case FX_RETAIN_DECOUPLE_CONFIG:
-      return "FX_RETAIN_DECOUPLE_CONFIG";
     case FX_RETAIN_SNAPSHOT:
       return "FX_RETAIN_SNAPSHOT";
     default:
@@ -337,7 +332,7 @@ Test(filterx_retain, allocator_floating_ref_is_duplicated_and_grounded)
 
   _disable_allocator();
   FilterXObject *r = filterx_object_ref(o);
-  filterx_eval_retain_object(&r, FX_RETAIN_DECOUPLE_CONFIG);
+  filterx_eval_retain_object(&r, FX_RETAIN_SNAPSHOT);
   cr_assert_neq(r, o);
   cr_assert_not(r->floating_ref);
   _assert_decoupled(r, "floating");
@@ -376,7 +371,7 @@ Test(filterx_retain, referenced_stack_object_retains_as_an_allocator_object)
 
   _disable_allocator();
   FilterXObject *r = filterx_object_ref(o);
-  filterx_eval_retain_object(&r, FX_RETAIN_DECOUPLE_CONFIG);
+  filterx_eval_retain_object(&r, FX_RETAIN_SNAPSHOT);
   cr_assert_neq(r, o);
   _assert_decoupled(r, "stack via ref");
 
@@ -397,12 +392,12 @@ Test(filterx_retain, retained_copy_lands_in_the_allocator_in_effect)
 
   _enable_allocator();
 
-  FilterXObject *r = filterx_eval_retain_dup(frozen, FX_RETAIN_DECOUPLE_CONFIG);
+  FilterXObject *r = filterx_eval_retain_dup(frozen, FX_RETAIN_SNAPSHOT);
   cr_assert_eq(r->allocator_id, TEST_ALLOCATOR_ID, "the frozen object's copy did not land in the active allocator");
   filterx_object_unref(r);
 
   _disable_allocator();
-  r = filterx_eval_retain_dup(frozen, FX_RETAIN_DECOUPLE_CONFIG);
+  r = filterx_eval_retain_dup(frozen, FX_RETAIN_SNAPSHOT);
   cr_assert_not(filterx_object_is_allocator_resident(r), "with the allocator off, the copy must be a heap object");
   filterx_object_unref(r);
 
@@ -449,9 +444,9 @@ Test(filterx_retain, hibernated_object_is_returned_as_is_at_every_goal)
 }
 
 /* 5) frozen at compile time (a literal): lives exactly as long as the
- * configuration, so it is good as-is for the message and until reload, but
- * has to be copied to outlive the configuration, into a snapshot too */
-Test(filterx_retain, compile_time_frozen_object_is_shared_until_reload_and_copied_to_decouple)
+ * configuration, so it is good as-is for the message, but has to be copied
+ * into a snapshot, which may outlive the configuration */
+Test(filterx_retain, compile_time_frozen_object_is_shared_for_delivery_and_copied_into_a_snapshot)
 {
   FilterXEnvironment env;
   filterx_env_init(&env);
@@ -461,92 +456,51 @@ Test(filterx_retain, compile_time_frozen_object_is_shared_until_reload_and_copie
   cr_assert_eq(r, o);
   filterx_object_unref(r);
 
-  r = filterx_eval_retain_dup(o, FX_RETAIN_UNTIL_RELOAD);
-  cr_assert_eq(r, o);
-  filterx_object_unref(r);
-
   FilterXObject *snapshot = filterx_eval_retain_dup(o, FX_RETAIN_SNAPSHOT);
   cr_assert_neq(snapshot, o, "a config literal was retained by reference for FX_RETAIN_SNAPSHOT");
-  filterx_object_unref(snapshot);
+  cr_assert(filterx_object_is_refcounted(snapshot));
+  cr_assert_not(snapshot->early_allocation);
+  _assert_decoupled(snapshot, "snapshot");
 
-  FilterXObject *decoupled = filterx_eval_retain_dup(o, FX_RETAIN_DECOUPLE_CONFIG);
-  cr_assert_neq(decoupled, o);
-  cr_assert(filterx_object_is_refcounted(decoupled));
-  cr_assert_not(decoupled->early_allocation);
-  _assert_decoupled(decoupled, "decouple");
-
-  /* the "configuration" goes away, the decoupled copy must survive it */
+  /* the "configuration" goes away, the copy must survive it */
   filterx_env_clear(&env);
-  assert_object_str_equals(decoupled, "frozen-literal");
-  filterx_object_unref(decoupled);
+  assert_object_str_equals(snapshot, "frozen-literal");
+  filterx_object_unref(snapshot);
 }
 
 /* 5b) the same for a frozen container literal */
-Test(filterx_retain, compile_time_frozen_container_is_deep_copied_to_decouple)
+Test(filterx_retain, compile_time_frozen_container_is_deep_copied_into_a_snapshot)
 {
   FilterXEnvironment env;
   filterx_env_init(&env);
   FilterXObject *o = _new_frozen_in_env(&env, _new_nested_dict);
 
-  FilterXObject *decoupled = filterx_eval_retain_dup(o, FX_RETAIN_DECOUPLE_CONFIG);
-  cr_assert_neq(decoupled, o);
-  cr_assert(filterx_object_is_refcounted(decoupled));
-  _assert_decoupled(decoupled, "decouple");
+  FilterXObject *snapshot = filterx_eval_retain_dup(o, FX_RETAIN_SNAPSHOT);
+  cr_assert_neq(snapshot, o);
+  cr_assert(filterx_object_is_refcounted(snapshot));
+  _assert_decoupled(snapshot, "snapshot");
 
   filterx_env_clear(&env);
-  assert_object_json_equals(decoupled, NESTED_DICT_JSON);
-  filterx_object_unref(decoupled);
+  assert_object_json_equals(snapshot, NESTED_DICT_JSON);
+  filterx_object_unref(snapshot);
 }
 
 /* 6) frozen at runtime into an environment that is *not* the config's: the
  * cache_json_file() stash.  Such an environment is released as soon as the
  * file gets reloaded and the last eval context holding a stash reference
- * finishes, which can be well before a config reload.  So unlike a literal,
- * a stashed object is only good until final delivery; both longer goals
- * need a copy. */
+ * finishes, which can be well before a config reload. */
 static FilterXObject *
 _new_runtime_frozen_string(void)
 {
   return filterx_string_new("stashed-value", -1);
 }
 
-Test(filterx_retain, runtime_frozen_object_without_early_allocation_is_copied_until_reload)
-{
-  /* frozen from a regular (non-restricted) context: early_allocation unset */
-  FilterXEnvironment env;
-  filterx_env_init(&env);
-  FilterXObject *o = _new_runtime_frozen_string();
-  cr_assert_not(o->early_allocation);
-  filterx_env_freeze_object(&env, &o);
-  cr_assert(filterx_object_is_frozen(o));
-
-  FilterXObject *r = filterx_eval_retain_dup(o, FX_RETAIN_UNTIL_FINAL_DELIVERY);
-  cr_assert_eq(r, o);
-  filterx_object_unref(r);
-
-  FilterXObject *until_reload = filterx_eval_retain_dup(o, FX_RETAIN_UNTIL_RELOAD);
-  cr_assert_neq(until_reload, o);
-  cr_assert(filterx_object_is_refcounted(until_reload));
-
-  FilterXObject *decoupled = filterx_eval_retain_dup(o, FX_RETAIN_DECOUPLE_CONFIG);
-  cr_assert_neq(decoupled, o);
-  cr_assert(filterx_object_is_refcounted(decoupled));
-
-  /* the stash goes away */
-  filterx_env_clear(&env);
-  assert_object_str_equals(until_reload, "stashed-value");
-  assert_object_str_equals(decoupled, "stashed-value");
-  filterx_object_unref(until_reload);
-  filterx_object_unref(decoupled);
-}
-
-Test(filterx_retain, stashed_object_is_copied_until_reload_and_pinned_by_a_snapshot)
+Test(filterx_retain, stashed_object_is_pinned_by_a_snapshot)
 {
   /* this is what cache_json_file() produces: built in the stash's own build
    * context (restricted, like compile time) and frozen into an environment
    * owned by the stash, not by the configuration.  Unlike a config literal,
-   * it must therefore not pose as an early allocation, or a reference
-   * retained until the next reload could outlive it.  A snapshot carries
+   * it must therefore not pose as an early allocation.  A snapshot carries
    * a reference of its own on the stash (see filterx_eval_context_dup()),
    * so it keeps the object itself by reference. */
   FilterXEnvironment env;
@@ -560,18 +514,11 @@ Test(filterx_retain, stashed_object_is_copied_until_reload_and_pinned_by_a_snaps
   filterx_stash_end_build_context(&build_context);
   cr_assert(filterx_object_is_frozen(o));
 
-  FilterXObject *until_reload = filterx_eval_retain_dup(o, FX_RETAIN_UNTIL_RELOAD);
-  cr_assert_neq(until_reload, o, "a stashed object was retained by reference for FX_RETAIN_UNTIL_RELOAD, "
-                                 "even though its environment can be released before the next reload");
-  cr_assert(filterx_object_is_refcounted(until_reload));
-
   FilterXObject *pinned = filterx_eval_retain_dup(o, FX_RETAIN_SNAPSHOT);
   cr_assert_eq(pinned, o, "a stashed object was copied for FX_RETAIN_SNAPSHOT instead of being pinned");
   filterx_object_unref(pinned);
 
   filterx_env_clear(&env);
-  assert_object_str_equals(until_reload, "stashed-value");
-  filterx_object_unref(until_reload);
 }
 
 /* 7) message backed: the object is heap allocated and reference counted,
@@ -589,7 +536,7 @@ _new_message_with_values(void)
 
 Test(filterx_retain, message_backed_string_is_copied_when_retained_past_the_message)
 {
-  FilterXEvalRetainGoal goals[] = { FX_RETAIN_UNTIL_RELOAD, FX_RETAIN_DECOUPLE_CONFIG, FX_RETAIN_SNAPSHOT };
+  FilterXEvalRetainGoal goals[] = { FX_RETAIN_SNAPSHOT };
 
   for (gsize i = 0; i < G_N_ELEMENTS(goals); i++)
     {
@@ -614,7 +561,7 @@ Test(filterx_retain, message_backed_string_is_copied_when_retained_past_the_mess
 
 Test(filterx_retain, message_backed_message_value_is_copied_when_retained_past_the_message)
 {
-  FilterXEvalRetainGoal goals[] = { FX_RETAIN_UNTIL_RELOAD, FX_RETAIN_DECOUPLE_CONFIG, FX_RETAIN_SNAPSHOT };
+  FilterXEvalRetainGoal goals[] = { FX_RETAIN_SNAPSHOT };
 
   for (gsize i = 0; i < G_N_ELEMENTS(goals); i++)
     {
@@ -638,7 +585,11 @@ Test(filterx_retain, message_backed_message_value_is_copied_when_retained_past_t
     }
 }
 
-Test(filterx_retain, message_backed_value_stored_deep_marks_the_outer_container)
+/* 7b) a container never borrows from the message: a message backed value
+ * is copied as it is stored into one (filterx_object_cow_store()), so the
+ * container stays valid past the message without anything looking below
+ * its top level */
+Test(filterx_retain, message_backed_value_is_copied_as_it_is_stored_into_a_container)
 {
   LogMessage *msg = _new_message_with_values();
   FilterXObject *outer = _new_nested_dict();
@@ -647,14 +598,15 @@ Test(filterx_retain, message_backed_value_stored_deep_marks_the_outer_container)
 
   FILTERX_INTEGER_DECLARE_ON_STACK(index, 0);
   FilterXObject *value = filterx_extract_object_from_logmsg(msg, log_msg_get_value_handle("str"));
+  cr_assert(value->is_nvtable_backed);
   cr_assert(filterx_object_set_subscript(items, index, &value));
   filterx_object_unref(value);
-  cr_assert(filterx_object_borrows_from_message(outer));
+  _assert_decoupled(outer, "deep store");
 
-  FilterXObject *r = filterx_object_ref(outer);
-  filterx_eval_retain_object(&r, FX_RETAIN_DECOUPLE_CONFIG);
-  cr_assert_neq(r, outer);
-  _assert_decoupled(r, "deep store");
+  /* heap allocated, reference counted, owns all of its bytes: a reference
+   * is all a snapshot needs */
+  FilterXObject *r = filterx_eval_retain_dup(outer, FX_RETAIN_SNAPSHOT);
+  cr_assert_eq(r, outer);
 
   filterx_object_unref(items);
   filterx_object_unref(outer);
@@ -663,7 +615,7 @@ Test(filterx_retain, message_backed_value_stored_deep_marks_the_outer_container)
   filterx_object_unref(r);
 }
 
-Test(filterx_retain, dict_with_a_message_backed_key_is_copied_when_retained_past_the_message)
+Test(filterx_retain, message_backed_key_is_copied_as_it_is_stored_into_a_dict)
 {
   LogMessage *msg = _new_message_with_values();
   FilterXObject *key = filterx_extract_object_from_logmsg(msg, log_msg_get_value_handle("str"));
@@ -674,75 +626,45 @@ Test(filterx_retain, dict_with_a_message_backed_key_is_copied_when_retained_past
   cr_assert(filterx_object_set_subscript(dict, key, &value));
   filterx_object_unref(value);
   filterx_object_cow_prepare(&dict);
-  cr_assert(filterx_object_borrows_from_message(dict));
-
-  FilterXObject *r = filterx_object_ref(dict);
-  filterx_eval_retain_object(&r, FX_RETAIN_DECOUPLE_CONFIG);
-  cr_assert_neq(r, dict);
-  _assert_decoupled(r, "dict key");
+  _assert_decoupled(dict, "dict key");
 
   filterx_object_unref(key);
-  filterx_object_unref(dict);
   log_msg_unref(msg);
-  assert_object_json_equals(r, "{\"nvtable-string-value\":4242}");
-  filterx_object_unref(r);
+  assert_object_json_equals(dict, "{\"nvtable-string-value\":4242}");
+  filterx_object_unref(dict);
 }
 
-/* leaves only: a nested container keeps its (sticky) mark by design */
-static gboolean
-_assert_entry_direct(FilterXObject *key, FilterXObject *value, gpointer user_data)
-{
-  cr_assert_not(filterx_object_borrows_from_message(key), "%s: a key still borrows from the message",
-                (gchar *) user_data);
-  if (!filterx_object_is_ref(value))
-    cr_assert_not(filterx_object_borrows_from_message(value), "%s: a value still borrows from the message",
-                  (gchar *) user_data);
-  return TRUE;
-}
-
-Test(filterx_retain, make_direct_copies_the_message_backed_leaves_and_keeps_the_containers)
+Test(filterx_retain, message_backed_value_is_copied_as_it_is_stored_into_a_tuple)
 {
   LogMessage *msg = _new_message_with_values();
-  FilterXObject *outer = _new_nested_dict();
-  FilterXObject *items = filterx_object_getattr_string(outer, "items");
-  cr_assert_not_null(items);
+  FilterXObject *value = filterx_extract_object_from_logmsg(msg, log_msg_get_value_handle("str"));
+  cr_assert(value->is_nvtable_backed);
+
+  FilterXObject *tuple = filterx_tuple_new(1);
+  filterx_tuple_set_subscript(tuple, 0, value);
+  _assert_decoupled(tuple, "tuple");
+
+  filterx_object_unref(value);
+  log_msg_unref(msg);
 
   FILTERX_INTEGER_DECLARE_ON_STACK(index, 0);
-  FilterXObject *elem = filterx_extract_object_from_logmsg(msg, log_msg_get_value_handle("str"));
-  cr_assert(filterx_object_set_subscript(items, index, &elem));
+  FilterXObject *elem = filterx_object_get_subscript(tuple, index);
+  assert_object_str_equals(elem, "nvtable-string-value");
   filterx_object_unref(elem);
-
-  FilterXObject *key = filterx_extract_object_from_logmsg(msg, log_msg_get_value_handle("str"));
-  FilterXObject *value = filterx_extract_object_from_logmsg(msg, log_msg_get_value_handle("int"));
-  cr_assert(filterx_object_set_subscript(outer, key, &value));
-  filterx_object_unref(value);
-  cr_assert(filterx_object_borrows_from_message(outer));
-
-  FilterXObject *direct = outer;
-  filterx_object_make_direct(&direct);
-  cr_assert_eq(direct, outer, "a container must be made direct in place, not replaced");
-
-  FilterXObject *items_after = filterx_object_getattr_string(outer, "items");
-  cr_assert_eq(filterx_ref_unwrap_ro(items_after), filterx_ref_unwrap_ro(items), "the nested list was replaced");
-  cr_assert(filterx_object_iter(outer, _assert_entry_direct, "dict"));
-  cr_assert(filterx_object_iter(items, _assert_entry_direct, "list"));
-
-  filterx_object_unref(items_after);
-  filterx_object_unref(items);
-  filterx_object_unref(key);
-  log_msg_unref(msg);
-  assert_object_json_equals(outer, "{\"name\":\"nested-value\",\"items\":[\"nvtable-string-value\",\"list-element\"],"
-                                   "\"nvtable-string-value\":12345}");
-  filterx_object_unref(outer);
+  filterx_object_unref(tuple);
 }
 
-Test(filterx_retain, scope_sync_makes_a_declared_dict_direct_in_place)
+/* 7c) a variable slot is not a container, it keeps the borrowed value (the
+ * common `x = $MSG` case stays free of copies); filterx_scope_sync() makes
+ * the declared and message-tied ones direct before it writes the message */
+Test(filterx_retain, scope_sync_makes_a_message_backed_declared_variable_direct)
 {
   LogPathOptions path_options = LOG_PATH_OPTIONS_INIT;
   LogMessage *msg = _new_message_with_values();
   FilterXVariableHandle handles[] =
   {
     filterx_map_varname_to_handle("$tied", FX_VAR_MESSAGE_TIED),
+    filterx_map_varname_to_handle("field", FX_VAR_DECLARED_FLOATING),
     filterx_map_varname_to_handle("dict", FX_VAR_DECLARED_FLOATING),
   };
   FilterXScopeVariableLayout *layout = filterx_scope_variable_layout_new_from_handles(handles, G_N_ELEMENTS(handles));
@@ -758,19 +680,27 @@ Test(filterx_retain, scope_sync_makes_a_declared_dict_direct_in_place)
 
   FilterXVariable *declared = filterx_scope_register_variable(scope, FX_VAR_DECLARED_FLOATING, handles[1],
                                                               filterx_scope_variable_layout_get_index(layout, handles[1]));
-  FilterXObject *dict = _new_nested_dict();
   FilterXObject *field = filterx_extract_object_from_logmsg(msg, log_msg_get_value_handle("str"));
-  _dict_set(dict, "field", field);
-  filterx_scope_set_variable(scope, declared, &dict, TRUE);
-  cr_assert(filterx_object_borrows_from_message(filterx_variable_borrow_value(declared)));
+  filterx_scope_set_variable(scope, declared, &field, TRUE);
+  filterx_object_unref(field);
+  cr_assert(filterx_object_is_nvtable_backed(filterx_variable_borrow_value(declared)),
+            "a variable slot is expected to keep the borrowed value");
+
+  FilterXVariable *declared_dict = filterx_scope_register_variable(scope, FX_VAR_DECLARED_FLOATING, handles[2],
+                                   filterx_scope_variable_layout_get_index(layout, handles[2]));
+  FilterXObject *dict = _new_nested_dict();
+  _dict_set(dict, "field", filterx_extract_object_from_logmsg(msg, log_msg_get_value_handle("str")));
+  filterx_scope_set_variable(scope, declared_dict, &dict, TRUE);
 
   filterx_scope_set_dirty(scope);
   filterx_scope_sync(scope, &msg, &path_options);
 
-  FilterXObject *after = filterx_variable_borrow_value(declared);
-  cr_assert_eq(filterx_ref_unwrap_ro(after), filterx_ref_unwrap_ro(dict),
-               "the sync copied the dict instead of its leaves");
-  cr_assert(filterx_object_iter(after, _assert_entry_direct, "synced dict"));
+  _assert_decoupled(filterx_variable_borrow_value(declared), "synced variable");
+  assert_object_str_equals(filterx_variable_borrow_value(declared), "nvtable-string-value");
+
+  FilterXObject *after = filterx_variable_borrow_value(declared_dict);
+  cr_assert_eq(filterx_ref_unwrap_ro(after), filterx_ref_unwrap_ro(dict), "the sync copied the dict");
+  _assert_decoupled(after, "synced dict");
   assert_object_json_equals(after,
                             "{\"name\":\"nested-value\",\"items\":[4242,\"list-element\"],\"field\":\"nvtable-string-value\"}");
 
@@ -833,7 +763,7 @@ Test(filterx_retain, heap_slice_of_an_allocator_string_does_not_borrow_from_it)
   assert_object_str_equals(slice, "fairly-long-base-str");
 
   FilterXObject *r = filterx_object_ref(slice);
-  filterx_eval_retain_object(&r, FX_RETAIN_DECOUPLE_CONFIG);
+  filterx_eval_retain_object(&r, FX_RETAIN_SNAPSHOT);
   _assert_decoupled(r, "slice");
 
   filterx_object_unref(slice);
@@ -879,7 +809,7 @@ Test(filterx_retain, allocator_metrics_labels_is_deep_copied)
 
   _disable_allocator();
   FilterXObject *r = filterx_object_ref(o);
-  filterx_eval_retain_object(&r, FX_RETAIN_DECOUPLE_CONFIG);
+  filterx_eval_retain_object(&r, FX_RETAIN_SNAPSHOT);
   cr_assert_neq(r, o);
   _assert_decoupled(r, "metrics_labels");
 
@@ -890,23 +820,18 @@ Test(filterx_retain, allocator_metrics_labels_is_deep_copied)
   filterx_object_unref(expected);
 }
 
-Test(filterx_retain, message_backed_metrics_labels_is_copied_when_retained_past_the_message)
+Test(filterx_retain, message_backed_value_is_copied_as_it_is_stored_into_metrics_labels)
 {
   FilterXObject *expected = _new_metrics_labels(filterx_string_new("nvtable-string-value", -1));
 
   LogMessage *msg = _new_message_with_values();
   FilterXObject *ml = _new_metrics_labels(filterx_extract_object_from_logmsg(msg, log_msg_get_value_handle("str")));
-  cr_assert(filterx_object_borrows_from_message(ml));
 
-  FilterXObject *r = filterx_object_ref(ml);
-  filterx_eval_retain_object(&r, FX_RETAIN_DECOUPLE_CONFIG);
-  cr_assert_neq(r, ml);
-  _assert_decoupled(r, "metrics_labels");
-
-  filterx_object_unref(ml);
+  /* the labels point into the objects the metrics_labels keeps: with the
+   * message gone, they must still read the same */
   log_msg_unref(msg);
-  _assert_repr_matches(r, expected);
-  filterx_object_unref(r);
+  _assert_repr_matches(ml, expected);
+  filterx_object_unref(ml);
   filterx_object_unref(expected);
 }
 

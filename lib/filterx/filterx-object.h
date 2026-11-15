@@ -49,10 +49,6 @@ struct _FilterXType
   FilterXObject *(*clone)(FilterXObject *self);
   FilterXObject *(*clone_container)(FilterXObject *self, FilterXObject *container, FilterXObject *child_of_interest,
                                     gboolean dup);
-  /* replace the message backed leaves below @self with copies, in place,
-   * recursing through the children; the containers and the xref implement
-   * it, see filterx_object_make_direct() */
-  void (*make_direct)(FilterXObject *self);
   gboolean (*truthy)(FilterXObject *self);
 
   /* attribute access */
@@ -919,53 +915,20 @@ filterx_object_cow_fork(FilterXObject **pself)
   return filterx_object_cow_fork2(*pself, pself);
 }
 
-/* TRUE if @self borrows its bytes from a LogMessage's NVTable, or is a
- * container holding something that does; for an xref, the value behind it
- * is what counts.  Such an object is only valid as long as the message is,
- * see filterx_object_note_child_stored() for how the mark spreads. */
-static inline gboolean
-filterx_object_borrows_from_message(FilterXObject *self)
-{
-  return self->is_nvtable_backed || filterx_ref_unwrap_ro(self)->is_nvtable_backed;
-}
-
-/* is_nvtable_backed is transitive: a container holding a message backed
- * value borrows from the message just as much.  Every store marks the
- * immediate container, the xref mutators carry the mark up the chain (see
- * _filterx_ref_propagate_nvtable_backed()) and nothing clears it. */
-static inline void
-filterx_object_note_child_stored(FilterXObject *container, FilterXObject *child)
-{
-  if (container && filterx_object_borrows_from_message(child))
-    container->is_nvtable_backed = TRUE;
-}
-
 /*
- * Stop @self from borrowing bytes from the message: a string or a
- * message_value is replaced by its copy, a container with a make_direct
- * method replaces its message backed children in place.  An xref is always
- * kept, so the parent_container links pointing at it stay valid; the value
- * behind it is kept too unless its type has no in-place path (see
- * _filterx_ref_make_direct()).  The mark stays on the container (it is
- * never cleared, see above): a later call walks it again and finds nothing
- * left to copy.  Clearing it would open a hole: another xref on a shared
- * child can still carry the mark, and the upward propagation stops at the
- * first marked xref, so a cleared ancestor would stay unmarked while a new
- * message backed leaf lands below it.
+ * Stop @self from borrowing its bytes from the message: a message backed
+ * string or message_value (is_nvtable_backed) is replaced by a copy of its
+ * own.  Only such leaves ever carry the mark: a container copies them as
+ * they are stored into it (see filterx_object_cow_store()), so it never
+ * holds borrowed bytes and there is nothing to walk here.
  */
 static inline void
 filterx_object_make_direct(FilterXObject **pself)
 {
   FilterXObject *self = *pself;
 
-  if (!self || !filterx_object_borrows_from_message(self))
+  if (!self || !filterx_object_is_nvtable_backed(self))
     return;
-
-  if (self->type->make_direct)
-    {
-      self->type->make_direct(self);
-      return;
-    }
 
   *pself = filterx_object_dup(self);
   filterx_object_unref(self);
@@ -1000,12 +963,19 @@ filterx_object_assert_child_storable(FilterXObject *container, FilterXObject *ch
  * the (grounded) reference the container is to keep.  @container is the
  * object that will hold the value; NULL when the holder is not an object
  * (e.g.  a variable slot), in which case nothing is checked.
+ *
+ * A message backed value is copied on its way into a container, so that a
+ * container never borrows from the message: whatever has to outlive the
+ * message (the sync at the end of a block, a retained object) only has to
+ * look at the value itself, not at everything below it.  A variable slot
+ * keeps the borrowed value, filterx_scope_sync() deals with those.
  */
 static inline FilterXObject *
 filterx_object_cow_store(FilterXObject *container, FilterXObject **pself)
 {
+  if (container)
+    filterx_object_make_direct(pself);
   filterx_object_cow_prepare(pself);
-  filterx_object_note_child_stored(container, *pself);
 
   FilterXObject *stored = filterx_ref_ground(filterx_object_ref(*pself));
   filterx_object_assert_child_storable(container, stored);

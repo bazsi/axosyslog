@@ -360,10 +360,11 @@ filterx_eval_restore_allocator(gpointer *saved_state)
  *      only valid until that frame returns.
  *      (filterx_object_is_stack_allocated())
  *
- * Orthogonal to the above, an object may borrow its bytes from the
- * LogMessage being processed instead of owning them (a message backed
- * string or message_value, or a container holding one), valid only as long
- * as that message is. (filterx_object_borrows_from_message())
+ * Orthogonal to the above, a string or message_value may borrow its bytes
+ * from the LogMessage being processed instead of owning them, valid only as
+ * long as that message is (filterx_object_is_nvtable_backed()).  Containers
+ * never hold such a value, it is copied as it is stored into one (see
+ * filterx_object_cow_store()), so looking at the object itself is enough.
  */
 
 typedef enum
@@ -371,19 +372,16 @@ typedef enum
   /* retain this object at least up to the last delivery of the current
    * message */
   FX_RETAIN_UNTIL_FINAL_DELIVERY,
-  /* retain this object at least up to the next configuration reload */
-  FX_RETAIN_UNTIL_RELOAD,
 
-  /* retain this object independently from configurations, e.g.  until its
-   * reference count is larger than zero, even in face of configuration
-   * reloads */
-  FX_RETAIN_DECOUPLE_CONFIG,
-
-  /* FX_RETAIN_DECOUPLE_CONFIG for a snapshot of the current eval context
-   * that carries the context's stash references along (the way
-   * filterx_eval_context_dup() does): a frozen object owned by a stash
-   * rather than by the configuration -- frozen, but no early_allocation,
-   * see filterx_stash_begin_build_context() -- is then kept alive by the
+  /* retain this object for a snapshot of the current eval context (see
+   * filterx_eval_context_dup()), independently of the message, the thread
+   * and the configuration it was taken in: a proper reference counted
+   * object is kept by reference, anything else is copied.
+   *
+   * The snapshot carries the context's stash references along, so the one
+   * exception is a frozen object owned by a stash rather than by the
+   * configuration -- frozen, but no early_allocation, see
+   * filterx_stash_begin_build_context() -- which is kept alive by the
    * snapshot itself and does not need to be copied, however large it is
    * (think of a cache_json_file() tree).  Only valid when the caller does
    * carry those references. */
@@ -412,41 +410,9 @@ filterx_eval_retain_dup_needed(FilterXObject *object, FilterXEvalRetainGoal goal
     {
     case FX_RETAIN_UNTIL_FINAL_DELIVERY:
       return FALSE;
-    case FX_RETAIN_UNTIL_RELOAD:
-      /* bytes borrowed from the message do not outlive it, this goal does */
-      if (filterx_object_borrows_from_message(object))
-        return TRUE;
-      if (object->early_allocation)
-        {
-          /* early allocated objects, these are always preserved and will be good until reload */
-#if SYSLOG_NG_ENABLE_DEBUG
-          g_assert(filterx_object_is_preserved(object));
-#endif
-          return FALSE;
-        }
-      /* refcounted and hibnerated objects don't need duplication */
-      if (filterx_object_is_refcounted(object) ||
-          filterx_object_is_hibernated(object))
-        return FALSE;
-      /* the remaining case is stashed objects, which are not safe to keep
-       * around, so let's duplicate those */
-
-#if SYSLOG_NG_ENABLE_DEBUG
-      g_assert(filterx_object_is_frozen(object));
-#endif
-      return TRUE;
-    case FX_RETAIN_DECOUPLE_CONFIG:
-      /* bytes borrowed from the message do not outlive it, this goal does */
-      if (filterx_object_borrows_from_message(object))
-        return TRUE;
-      /* we want a proper reference counted object, allocated on the heap,
-       * preserved objects are not good enough as we want them to survive a
-       * reload */
-      if (!filterx_object_is_preserved(object))
-        return FALSE;
-      return TRUE;
     case FX_RETAIN_SNAPSHOT:
-      if (filterx_object_borrows_from_message(object))
+      /* bytes borrowed from the message do not outlive it, a snapshot may */
+      if (filterx_object_is_nvtable_backed(object))
         return TRUE;
       if (!filterx_object_is_preserved(object))
         return FALSE;

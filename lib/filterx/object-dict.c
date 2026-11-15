@@ -637,10 +637,10 @@ _filterx_dict_set_subscript(FilterXObject *s, FilterXObject *key, FilterXObject 
 
   self->table = _table_resize_if_needed(self->table);
 
-  /* the key is ours to keep just like the value, the same rule applies */
+  /* the key is ours to keep just like the value, the same rules apply */
   FilterXObject *stored_key = filterx_object_vref(key);
+  filterx_object_make_direct(&stored_key);
   filterx_object_assert_child_storable(s, stored_key);
-  filterx_object_note_child_stored(s, stored_key);
   _table_insert(self->table, stored_key, filterx_object_cow_store(s, new_value));
 
   return TRUE;
@@ -753,27 +753,6 @@ _filterx_dict_iter(FilterXObject *s, FilterXObjectIterFunc func, gpointer user_d
   return _table_foreach(self->table, _filterx_dict_foreach_inner, args);
 }
 
-static gboolean
-_make_entry_direct(FilterXObject **key, FilterXObject **value, gpointer user_data)
-{
-  FilterXObject *s = (FilterXObject *) user_data;
-
-  filterx_object_make_direct(key);
-  filterx_object_assert_child_storable(s, *key);
-  filterx_object_make_direct(value);
-  filterx_object_assert_child_storable(s, *value);
-  return TRUE;
-}
-
-static void
-_filterx_dict_make_direct(FilterXObject *s)
-{
-  FilterXDictObject *self = (FilterXDictObject *) s;
-
-  if (self->table)
-    _table_foreach(self->table, _make_entry_direct, s);
-}
-
 static FilterXObject *
 _filterx_dict_new_bare_with_table(FilterXDictTable *table)
 {
@@ -796,13 +775,7 @@ _filterx_dict_clone_container(FilterXObject *s, FilterXObject *container, Filter
       new_table = _table_new(self->table->size);
       _table_clone(new_table, self->table, container, child_of_interest, dup);
     }
-  FilterXObject *clone = _filterx_dict_new_bare_with_table(new_table);
-
-  /* a shallow (copy-on-write) clone shares the children, so it borrows from
-   * the message just like the original; a deep one copied them */
-  if (!dup)
-    clone->is_nvtable_backed = s->is_nvtable_backed;
-  return clone;
+  return _filterx_dict_new_bare_with_table(new_table);
 }
 
 static FilterXObject *
@@ -982,7 +955,6 @@ FILTERX_DEFINE_TYPE(dict, FILTERX_TYPE_NAME(mapping),
                     .repr = _filterx_dict_repr,
                     .clone = _filterx_dict_clone,
                     .clone_container = _filterx_dict_clone_container,
-                    .make_direct = _filterx_dict_make_direct,
                     .get_subscript = _filterx_dict_get_subscript,
                     .set_subscript = _filterx_dict_set_subscript,
                     .is_key_set = _filterx_dict_is_key_set,

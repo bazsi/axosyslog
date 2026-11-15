@@ -127,6 +127,21 @@ _obj_to_string(FilterXObject *obj, const gchar **str, gsize *len)
   return result;
 }
 
+/* a container never borrows from the message (see
+ * filterx_object_cow_store()), and the labels point into the objects we
+ * keep: replace a message backed one with a string of our own */
+static void
+_make_label_object_direct(FilterXObject **obj, const gchar **str, gsize *len)
+{
+  if (!filterx_object_is_nvtable_backed(*obj))
+    return;
+
+  FilterXObject *direct = filterx_string_new(*str, *len);
+  filterx_object_unref(*obj);
+  *obj = direct;
+  *str = filterx_string_get_value_ref(direct, len);
+}
+
 static gboolean
 _set_subscript(FilterXObject *s, FilterXObject *key, FilterXObject **new_value)
 {
@@ -163,6 +178,8 @@ _set_subscript(FilterXObject *s, FilterXObject *key, FilterXObject **new_value)
    * self->objects, so those are children of ours, the same rule applies as
    * for any container (see filterx_object_assert_child_storable()) */
   FilterXObject *stored_key = filterx_object_ref(key);
+  _make_label_object_direct(&stored_key, &key_str, &key_len);
+  _make_label_object_direct(&value, &value_str, &value_len);
   filterx_object_assert_child_storable(s, stored_key);
   filterx_object_assert_child_storable(s, value);
 
@@ -171,11 +188,9 @@ _set_subscript(FilterXObject *s, FilterXObject *key, FilterXObject **new_value)
   *label = stats_cluster_label_len(key_str, key_len, value_str, value_len);
 
   g_ptr_array_add(self->objects, stored_key);
-  filterx_object_note_child_stored(s, stored_key);
 
   /* sink the ref we got from _obj_to_string */
   g_ptr_array_add(self->objects, value);
-  filterx_object_note_child_stored(s, value);
 
   self->sorted = FALSE;
   self->deduped = FALSE;

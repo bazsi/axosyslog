@@ -70,9 +70,10 @@ filterx_tuple_set_subscript(FilterXObject *s, gint64 index, FilterXObject *new_v
   FilterXObject **slot = (FilterXObject **) &g_ptr_array_index(self->array, index);
   filterx_object_unref(*slot);
 
+  /* a container never borrows from the message, see filterx_object_cow_store() */
   *slot = filterx_object_ref(new_value);
+  filterx_object_make_direct(slot);
   filterx_object_assert_child_storable(s, *slot);
-  filterx_object_note_child_stored(s, *slot);
 }
 
 
